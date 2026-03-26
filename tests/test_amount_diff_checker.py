@@ -10,21 +10,48 @@ from amount_diff_checker import (
 
 class AmountDiffCheckerTests(unittest.TestCase):
     def test_sampling_is_reproducible_with_seed(self) -> None:
-        df = pd.DataFrame(
-            {
-                "idcard": ["i1", "i1", "i2", "i2", "i3", "i3"],
-                "dateBack": ["2024-01-01", "2024-01-01", "2024-01-02", "2024-01-02", "2024-01-03", "2024-01-03"],
-                "card": ["c1", "c1", "c2", "c2", "c3", "c3"],
-                "source": ["s1", "s2", "s1", "s2", "s1", "s2"],
-            }
-        )
+        rows = []
+        for index in range(1, 9):
+            rows.append(
+                {
+                    "idcard": f"i{index}",
+                    "dateBack": f"2024-01-{index:02d}",
+                    "card": f"c{index}",
+                    "source": "s1",
+                }
+            )
+            rows.append(
+                {
+                    "idcard": f"i{index}",
+                    "dateBack": f"2024-01-{index:02d}",
+                    "card": f"c{index}",
+                    "source": "s2",
+                }
+            )
+        df = pd.DataFrame(rows)
 
-        sample_one = sample_data_by_idcard_dateback(df, "idcard", "dateBack", sample_rate=2 / 3, sample_seed=7)
-        sample_two = sample_data_by_idcard_dateback(df, "idcard", "dateBack", sample_rate=2 / 3, sample_seed=7)
-        sample_three = sample_data_by_idcard_dateback(df, "idcard", "dateBack", sample_rate=2 / 3, sample_seed=8)
+        sample_one = sample_data_by_idcard_dateback(df, "idcard", "dateBack", sample_rate=0.5, sample_seed=7)
+        sample_two = sample_data_by_idcard_dateback(df, "idcard", "dateBack", sample_rate=0.5, sample_seed=7)
+        sample_three = sample_data_by_idcard_dateback(df, "idcard", "dateBack", sample_rate=0.5, sample_seed=8)
+
+        sampled_keys_one = sorted(map(tuple, sample_one[["idcard", "dateBack"]].drop_duplicates().values.tolist()))
+        sampled_keys_three = sorted(map(tuple, sample_three[["idcard", "dateBack"]].drop_duplicates().values.tolist()))
+        expected_seed_seven_keys = [
+            ("i1", "2024-01-01"),
+            ("i3", "2024-01-03"),
+            ("i6", "2024-01-06"),
+            ("i7", "2024-01-07"),
+        ]
+        expected_seed_eight_keys = [
+            ("i1", "2024-01-01"),
+            ("i3", "2024-01-03"),
+            ("i7", "2024-01-07"),
+            ("i8", "2024-01-08"),
+        ]
 
         self.assertTrue(sample_one.equals(sample_two))
-        self.assertFalse(sample_one.equals(sample_three))
+        self.assertEqual(sampled_keys_one, expected_seed_seven_keys)
+        self.assertEqual(sampled_keys_three, expected_seed_eight_keys)
 
     def test_cross_institution_match_is_detected(self) -> None:
         df = pd.DataFrame(

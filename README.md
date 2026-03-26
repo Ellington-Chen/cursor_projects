@@ -56,5 +56,5 @@ results, summary = check_card_amount_diffs_different_institutions_fast(
 ### 运行自测
 
 ```bash
-python -m tests.test_amount_diff_checker
+python3 -m tests.test_amount_diff_checker
 ```
