@@ -84,6 +84,7 @@ class AmountDiffCheckerTests(unittest.TestCase):
         )
 
         self.assertEqual(summary["total_results"], 1)
+        self.assertEqual(summary["total_candidate_group_count"], 1)
         self.assertEqual(len(results), 1)
         self.assertEqual(results.iloc[0]["institution1"], "inst-b")
         self.assertEqual(results.iloc[0]["institution2"], "inst-a")
@@ -196,6 +197,72 @@ class AmountDiffCheckerTests(unittest.TestCase):
 
             unique_cards_df = pd.read_csv(output_path)
             self.assertEqual(unique_cards_df["card"].tolist(), ["card-1", "card-2"])
+            self.assertIn("pre_1_bank_fail_out_max", unique_cards_df.columns)
+            self.assertEqual(
+                unique_cards_df["pre_1_bank_fail_out_max"].tolist(),
+                ["card-1", "card-2"],
+            )
+
+    def test_multi_amount_cols_csv_has_per_column_cards(self) -> None:
+        df = pd.DataFrame(
+            [
+                {
+                    "idcard": "id-1",
+                    "dateBack": "2024-01-01",
+                    "card": "card-1",
+                    "source": "source-a",
+                    "col_a": '{"inst-x": 10.0}',
+                    "col_b": '{"inst-y": 20.0}',
+                },
+                {
+                    "idcard": "id-1",
+                    "dateBack": "2024-01-01",
+                    "card": "card-1",
+                    "source": "source-b",
+                    "col_a": '{"inst-z": 10.3}',
+                    "col_b": '{"inst-w": 99.0}',
+                },
+                {
+                    "idcard": "id-2",
+                    "dateBack": "2024-01-02",
+                    "card": "card-2",
+                    "source": "source-a",
+                    "col_a": '{"inst-x": 50.0}',
+                    "col_b": '{"inst-y": 30.0}',
+                },
+                {
+                    "idcard": "id-2",
+                    "dateBack": "2024-01-02",
+                    "card": "card-2",
+                    "source": "source-b",
+                    "col_a": '{"inst-z": 99.0}',
+                    "col_b": '{"inst-w": 30.1}',
+                },
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "unique_cards.csv"
+            results, summary = check_card_amount_diffs_different_institutions_refactored(
+                df,
+                use_sampling=False,
+                diff_threshold=0.5,
+                amount_json_cols=["col_a", "col_b"],
+                unique_cards_output_path=output_path,
+                show_progress=False,
+            )
+
+            self.assertIn("total_candidate_group_count", summary)
+            self.assertEqual(summary["total_candidate_group_count"], 4)
+
+            unique_cards_df = pd.read_csv(output_path)
+            self.assertIn("card", unique_cards_df.columns)
+            self.assertIn("col_a", unique_cards_df.columns)
+            self.assertIn("col_b", unique_cards_df.columns)
+
+            self.assertEqual(unique_cards_df["card"].dropna().tolist(), ["card-1", "card-2"])
+            self.assertEqual(unique_cards_df["col_a"].dropna().tolist(), ["card-1"])
+            self.assertEqual(unique_cards_df["col_b"].dropna().tolist(), ["card-2"])
 
     def test_text_progress_fallback_prints_when_tqdm_is_unavailable(self) -> None:
         df = pd.DataFrame(

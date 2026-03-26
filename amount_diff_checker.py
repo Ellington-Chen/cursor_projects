@@ -91,6 +91,7 @@ def _iter_with_progress(
 
 def _write_unique_cards_csv(
     unique_cards: Sequence[str],
+    column_cards: dict[str, list[str]],
     output_path: str | Path | None,
 ) -> str | None:
     if output_path is None:
@@ -98,7 +99,16 @@ def _write_unique_cards_csv(
 
     output_file = Path(output_path).expanduser().resolve()
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame({"card": list(unique_cards)}).to_csv(output_file, index=False, encoding="utf-8-sig")
+
+    data: dict[str, list[str]] = {"card": list(unique_cards)}
+    for col_name, cards in column_cards.items():
+        data[col_name] = list(cards)
+
+    max_len = max((len(v) for v in data.values()), default=0)
+    for key in data:
+        data[key] += [""] * (max_len - len(data[key]))
+
+    pd.DataFrame(data).to_csv(output_file, index=False, encoding="utf-8-sig")
     return str(output_file)
 
 
@@ -342,7 +352,9 @@ def check_card_amount_diffs_different_institutions_refactored(
 
     result_frames: list[pd.DataFrame] = []
     column_stats: dict[str, dict[str, Any]] = {}
+    column_cards: dict[str, list[str]] = {}
     total_parse_error_count = 0
+    total_candidate_group_count = 0
 
     amount_col_iterable = _iter_with_progress(
         amount_json_cols,
@@ -362,6 +374,7 @@ def check_card_amount_diffs_different_institutions_refactored(
             show_progress=show_progress,
         )
         total_parse_error_count += int(build_stats["parse_error_count"])
+        total_candidate_group_count += int(build_stats["candidate_group_count"])
 
         column_results: list[dict[str, Any]] = []
         grouped = long_df.groupby(group_keys, sort=False, dropna=False)
@@ -388,6 +401,7 @@ def check_card_amount_diffs_different_institutions_refactored(
         result_frames.append(column_result_df)
 
         cards = [] if column_result_df.empty else sorted(column_result_df["card"].dropna().astype(str).unique().tolist())
+        column_cards[amount_json_col] = cards
         column_stats[amount_json_col] = {
             **build_stats,
             "result_count": int(len(column_result_df)),
@@ -401,7 +415,7 @@ def check_card_amount_diffs_different_institutions_refactored(
         results_df = pd.DataFrame(columns=RESULT_COLUMNS)
 
     unique_cards = [] if results_df.empty else sorted(results_df["card"].dropna().astype(str).unique().tolist())
-    unique_cards_csv_output = _write_unique_cards_csv(unique_cards, unique_cards_output_path)
+    unique_cards_csv_output = _write_unique_cards_csv(unique_cards, column_cards, unique_cards_output_path)
     summary = {
         "input_row_count": int(len(df)),
         "sampled_row_count": sampled_row_count,
@@ -412,6 +426,7 @@ def check_card_amount_diffs_different_institutions_refactored(
         "sample_key_cols": list(sample_key_cols),
         "total_results": int(len(results_df)),
         "total_columns": len(amount_json_cols),
+        "total_candidate_group_count": total_candidate_group_count,
         "total_unique_cards": len(unique_cards),
         "unique_cards_output_path": unique_cards_csv_output,
         "parse_error_count": total_parse_error_count,
