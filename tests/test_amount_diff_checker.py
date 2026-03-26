@@ -1,4 +1,8 @@
+import io
+import tempfile
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
 
 import pandas as pd
 
@@ -139,6 +143,102 @@ class AmountDiffCheckerTests(unittest.TestCase):
         )
 
         self.assertEqual(summary["parse_error_count"], 1)
+
+    def test_unique_cards_are_written_to_csv_and_removed_from_summary(self) -> None:
+        df = pd.DataFrame(
+            [
+                {
+                    "idcard": "id-1",
+                    "dateBack": "2024-01-01",
+                    "card": "card-1",
+                    "source": "source-a",
+                    "pre_1_bank_fail_out_max": '{"inst-b": 100.0}',
+                },
+                {
+                    "idcard": "id-1",
+                    "dateBack": "2024-01-01",
+                    "card": "card-1",
+                    "source": "source-b",
+                    "pre_1_bank_fail_out_max": '{"inst-a": 100.2}',
+                },
+                {
+                    "idcard": "id-2",
+                    "dateBack": "2024-01-02",
+                    "card": "card-2",
+                    "source": "source-a",
+                    "pre_1_bank_fail_out_max": '{"inst-d": 200.0}',
+                },
+                {
+                    "idcard": "id-2",
+                    "dateBack": "2024-01-02",
+                    "card": "card-2",
+                    "source": "source-b",
+                    "pre_1_bank_fail_out_max": '{"inst-c": 200.3}',
+                },
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "unique_cards.csv"
+            results, summary = check_card_amount_diffs_different_institutions_refactored(
+                df,
+                use_sampling=False,
+                diff_threshold=0.5,
+                unique_cards_output_path=output_path,
+                show_progress=False,
+            )
+
+            self.assertEqual(len(results), 2)
+            self.assertNotIn("unique_cards", summary)
+            self.assertEqual(summary["total_unique_cards"], 2)
+            self.assertEqual(summary["unique_cards_output_path"], str(output_path.resolve()))
+            self.assertTrue(output_path.exists())
+
+            unique_cards_df = pd.read_csv(output_path)
+            self.assertEqual(unique_cards_df["card"].tolist(), ["card-1", "card-2"])
+
+    def test_text_progress_fallback_prints_when_tqdm_is_unavailable(self) -> None:
+        df = pd.DataFrame(
+            [
+                {
+                    "idcard": "id-1",
+                    "dateBack": "2024-01-01",
+                    "card": "card-1",
+                    "source": "source-a",
+                    "pre_1_bank_fail_out_max": '{"inst-b": 100.0}',
+                },
+                {
+                    "idcard": "id-1",
+                    "dateBack": "2024-01-01",
+                    "card": "card-1",
+                    "source": "source-b",
+                    "pre_1_bank_fail_out_max": '{"inst-a": 100.2}',
+                },
+            ]
+        )
+
+        from amount_diff_checker import TQDM_AVAILABLE, check_card_amount_diffs_different_institutions_refactored
+        import amount_diff_checker
+
+        previous_value = TQDM_AVAILABLE
+        amount_diff_checker.TQDM_AVAILABLE = False
+        buffer = io.StringIO()
+        try:
+            with redirect_stdout(buffer):
+                check_card_amount_diffs_different_institutions_refactored(
+                    df,
+                    use_sampling=False,
+                    diff_threshold=0.5,
+                    show_progress=True,
+                    unique_cards_output_path=None,
+                )
+        finally:
+            amount_diff_checker.TQDM_AVAILABLE = previous_value
+
+        progress_output = buffer.getvalue()
+        self.assertIn("处理金额列", progress_output)
+        self.assertIn("解析 pre_1_bank_fail_out_max", progress_output)
+        self.assertIn("匹配 pre_1_bank_fail_out_max", progress_output)
 
 
 if __name__ == "__main__":

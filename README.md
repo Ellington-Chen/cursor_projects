@@ -10,6 +10,8 @@
 - 抽样支持显式 `sample_seed`，同样的数据和参数下结果可复现。
 - 不再使用会漏检的 Dask 分区方案。
 - 使用“长表 + 按金额排序后的滑窗比较”来减少无效组合比较。
+- 支持进度可视化；如果安装了 `tqdm` 会显示进度条，否则退化为轻量文本进度。
+- `summary` 不再返回 `unique_cards`，唯一卡号会单独导出为 CSV。
 
 ### 主要入口
 
@@ -48,10 +50,19 @@ results, summary = check_card_amount_diffs_different_institutions_fast(
     use_sampling=True,
     sample_rate=1.0,
     sample_seed=7,
+    show_progress=True,
+    unique_cards_csv_path="unique_cards.csv",
     amount_json_cols=["pre_1_bank_fail_out_max"],
     diff_threshold=1.0,
 )
 ```
+
+`summary` 中会保留：
+
+- `total_unique_cards`
+- `unique_cards_csv_path`
+
+但不会再内嵌 `unique_cards` 列表。
 
 ### 运行自测
 
