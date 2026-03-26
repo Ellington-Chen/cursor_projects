@@ -85,6 +85,7 @@ class AmountDiffCheckerTests(unittest.TestCase):
 
         self.assertEqual(summary["total_results"], 1)
         self.assertEqual(summary["total_candidate_group_count"], 1)
+        self.assertEqual(summary["total_unique_idcards"], 1)
         self.assertEqual(len(results), 1)
         self.assertEqual(results.iloc[0]["institution1"], "inst-b")
         self.assertEqual(results.iloc[0]["institution2"], "inst-a")
@@ -192,6 +193,7 @@ class AmountDiffCheckerTests(unittest.TestCase):
             self.assertEqual(len(results), 2)
             self.assertNotIn("unique_cards", summary)
             self.assertEqual(summary["total_unique_cards"], 2)
+            self.assertEqual(summary["total_unique_idcards"], 2)
             self.assertEqual(summary["unique_cards_output_path"], str(output_path.resolve()))
             self.assertTrue(output_path.exists())
 
@@ -254,6 +256,8 @@ class AmountDiffCheckerTests(unittest.TestCase):
 
             self.assertIn("total_candidate_group_count", summary)
             self.assertEqual(summary["total_candidate_group_count"], 4)
+            self.assertNotIn("cards", summary["column_stats"]["col_a"])
+            self.assertNotIn("cards", summary["column_stats"]["col_b"])
 
             unique_cards_df = pd.read_csv(output_path)
             self.assertIn("card", unique_cards_df.columns)
