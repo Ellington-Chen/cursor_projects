@@ -4,10 +4,19 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+try:
+    from tqdm.auto import tqdm
+
+    TQDM_AVAILABLE = True
+except ImportError:
+    tqdm = None
+    TQDM_AVAILABLE = False
 
 
 DEFAULT_OUTPUT_DIR = Path("artifacts/lgbm_optuna")
@@ -34,6 +43,86 @@ class LightGBMOptunaResult:
     calibrated_best_iteration: int
     calibration_score: float
     oot_score: float | None
+
+
+class _StudyProgressReporter:
+    """Notebook / terminal friendly progress reporter for Optuna phases."""
+
+    def __init__(
+        self,
+        *,
+        phase_name: str,
+        total_trials: int,
+        direction: str,
+        enabled: bool,
+    ) -> None:
+        self.phase_name = phase_name
+        self.total_trials = total_trials
+        self.direction = direction
+        self.enabled = enabled and total_trials > 0
+        self.best_value: float | None = None
+        self.start_time = time.time()
+        self._bar: Any | None = None
+        self._last_reported_count = 0
+        self._text_step = max(1, total_trials // 10) if total_trials > 0 else 1
+
+        if not self.enabled:
+            return
+        if TQDM_AVAILABLE:
+            self._bar = tqdm(total=total_trials, desc=phase_name, leave=True)
+        else:
+            print(f"{phase_name}: 0/{total_trials} trials")
+
+    def __call__(self, study: Any, trial: Any) -> None:
+        del trial
+        if not self.enabled:
+            return
+
+        completed_count = len(study.trials)
+        self.best_value = self._extract_best_value(study)
+
+        if self._bar is not None:
+            increment = completed_count - self._bar.n
+            if increment > 0:
+                self._bar.update(increment)
+            postfix = self._build_postfix()
+            if postfix:
+                self._bar.set_postfix(postfix, refresh=False)
+            return
+
+        should_report = (
+            completed_count == self.total_trials
+            or completed_count == 1
+            or (completed_count - self._last_reported_count) >= self._text_step
+        )
+        if should_report:
+            best_text = "n/a" if self.best_value is None else f"{self.best_value:.6f}"
+            elapsed = time.time() - self.start_time
+            print(
+                f"{self.phase_name}: {completed_count}/{self.total_trials} trials, "
+                f"best={best_text}, elapsed={elapsed:.1f}s"
+            )
+            self._last_reported_count = completed_count
+
+    def close(self) -> None:
+        if self._bar is not None:
+            postfix = self._build_postfix()
+            if postfix:
+                self._bar.set_postfix(postfix, refresh=False)
+            self._bar.close()
+
+    def _build_postfix(self) -> dict[str, str]:
+        if self.best_value is None:
+            return {}
+        key = "best(max)" if self.direction == "maximize" else "best(min)"
+        return {key: f"{self.best_value:.6f}"}
+
+    def _extract_best_value(self, study: Any) -> float | None:
+        completed_trials = [trial for trial in study.trials if getattr(trial, "value", None) is not None]
+        if not completed_trials:
+            return None
+        values = [float(trial.value) for trial in completed_trials]
+        return max(values) if self.direction == "maximize" else min(values)
 
 
 def parse_args() -> argparse.Namespace:
@@ -657,6 +746,7 @@ def run_phase(
     seed_trials: list[dict[str, Any]] | None,
     dataset_params: dict[str, Any],
     max_bin: int,
+    show_progress: bool,
     lgb: Any,
     optuna: Any,
     train_test_split: Any,
@@ -723,12 +813,20 @@ def run_phase(
         lgb=lgb,
         optuna=optuna,
     )
+    progress_reporter = _StudyProgressReporter(
+        phase_name=phase_name,
+        total_trials=trials,
+        direction=direction,
+        enabled=show_progress,
+    )
     study.optimize(
         objective,
         n_trials=trials,
         n_jobs=trial_parallelism,
+        callbacks=[progress_reporter],
         gc_after_trial=True,
     )
+    progress_reporter.close()
 
     best_trial = get_best_completed_trial(study, optuna)
     best_params = best_trial.user_attrs.get(
@@ -971,6 +1069,7 @@ def run_lightgbm_optuna(
     storage: str = "",
     save_artifacts: bool = True,
     verbose: bool = True,
+    show_progress: bool = True,
 ) -> LightGBMOptunaResult:
     """Run LightGBM + Optuna tuning directly from dataframes.
 
@@ -1076,6 +1175,7 @@ def run_lightgbm_optuna(
             seed_trials=None,
             dataset_params=dataset_params,
             max_bin=max_bin,
+            show_progress=show_progress,
             lgb=lgb,
             optuna=optuna,
             train_test_split=train_test_split,
@@ -1116,6 +1216,7 @@ def run_lightgbm_optuna(
         seed_trials=phase2_seed_trials,
         dataset_params=dataset_params,
         max_bin=max_bin,
+        show_progress=show_progress,
         lgb=lgb,
         optuna=optuna,
         train_test_split=train_test_split,
@@ -1312,6 +1413,7 @@ def main() -> None:
         storage=args.storage,
         save_artifacts=True,
         verbose=True,
+        show_progress=True,
     )
 
 

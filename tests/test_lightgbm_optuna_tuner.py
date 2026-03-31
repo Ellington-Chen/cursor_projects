@@ -1,14 +1,18 @@
+import io
 import unittest
+from contextlib import redirect_stdout
 
 import pandas as pd
 
 from lightgbm_optuna_tuner import (
+    TQDM_AVAILABLE,
     build_lgb_params,
     infer_direction,
     infer_metric,
     infer_feature_columns,
     resolve_num_threads,
     split_dataframe_by_column,
+    _StudyProgressReporter,
 )
 
 
@@ -111,6 +115,42 @@ class LightGBMOptunaTunerTests(unittest.TestCase):
             sample_weight_col="",
         )
         self.assertEqual(feature_cols, ["f1", "f2"])
+
+    def test_study_progress_reporter_prints_text_without_tqdm(self) -> None:
+        import lightgbm_optuna_tuner
+
+        previous_value = TQDM_AVAILABLE
+        lightgbm_optuna_tuner.TQDM_AVAILABLE = False
+        reporter = _StudyProgressReporter(
+            phase_name="phase_demo",
+            total_trials=3,
+            direction="maximize",
+            enabled=True,
+        )
+
+        class Trial:
+            def __init__(self, value: float) -> None:
+                self.value = value
+
+        class Study:
+            def __init__(self, values: list[float]) -> None:
+                self.trials = [Trial(value) for value in values]
+
+        buffer = io.StringIO()
+        try:
+            with redirect_stdout(buffer):
+                reporter(Study([0.61]), None)
+                reporter(Study([0.61, 0.63]), None)
+                reporter(Study([0.61, 0.63, 0.62]), None)
+                reporter.close()
+        finally:
+            lightgbm_optuna_tuner.TQDM_AVAILABLE = previous_value
+
+        progress_output = buffer.getvalue()
+        self.assertIn("phase_demo", progress_output)
+        self.assertIn("1/3", progress_output)
+        self.assertIn("3/3", progress_output)
+        self.assertIn("best=0.630000", progress_output)
 
 
 if __name__ == "__main__":

@@ -197,6 +197,7 @@ result = run_lightgbm_optuna(
     trial_parallelism=1,
     num_threads=4,
     output_dir="artifacts/lgbm_optuna_notebook",
+    show_progress=True,
 )
 
 result.best_params
@@ -223,8 +224,15 @@ result = run_lightgbm_optuna_from_df(
     main_phase_trials=24,
     trial_parallelism=1,
     num_threads=4,
+    show_progress=True,
 )
 ```
+
+进度可视化说明：
+
+- `show_progress=True`：显示每个 phase 的 trial 进度
+- `show_progress=False`：关闭 trial 级进度显示
+- 安装了 `tqdm` 时会显示进度条；否则自动退化成文本进度
 
 返回对象 `result` 里主要有：
 
