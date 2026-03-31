@@ -91,6 +91,9 @@ python3 -m tests.test_amount_diff_checker
   - 避免机器核数不多时，多个 trial 抢资源导致反而更慢
 - **最后才用全量 train + valid 重训**
   - 调参阶段不在全量 93 万数据上硬跑全部 trial
+- **固定部分 Dataset 级参数**
+  - 例如 `max_bin`、`feature_pre_filter`
+  - 这样可以安全复用 LightGBM Dataset，避免每个 trial 重建分桶结构
 
 ### 输入方式
 

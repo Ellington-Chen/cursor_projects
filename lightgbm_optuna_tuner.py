@@ -139,6 +139,15 @@ def parse_args() -> argparse.Namespace:
         help="Threads per LightGBM trial. 0 means auto = cpu_count // trial_parallelism.",
     )
     parser.add_argument(
+        "--max-bin",
+        type=int,
+        default=127,
+        help=(
+            "Fixed LightGBM max_bin used for all phases. Kept outside Optuna search so "
+            "Dataset binning can be reused across trials. Lower values are faster."
+        ),
+    )
+    parser.add_argument(
         "--study-name",
         default="",
         help="Optional Optuna study name. Useful together with --storage for resuming.",
@@ -376,7 +385,11 @@ def prepare_categorical_columns(
     auto_categorical_cols: list[str] = []
     for column in feature_cols:
         dtype = train_df[column].dtype
-        if pd.api.types.is_object_dtype(dtype) or pd.api.types.is_string_dtype(dtype) or pd.api.types.is_categorical_dtype(dtype):
+        if (
+            pd.api.types.is_object_dtype(dtype)
+            or pd.api.types.is_string_dtype(dtype)
+            or isinstance(dtype, pd.CategoricalDtype)
+        ):
             auto_categorical_cols.append(column)
 
     categorical_cols = sorted({*explicit_categorical_cols, *auto_categorical_cols}.intersection(feature_cols))
@@ -429,6 +442,7 @@ def build_dataset(
     sample_weight_col: str,
     lgb: Any,
     reference: Any | None = None,
+    dataset_params: dict[str, Any] | None = None,
 ) -> Any:
     weight = frame[sample_weight_col] if sample_weight_col else None
     dataset = lgb.Dataset(
@@ -436,6 +450,7 @@ def build_dataset(
         label=frame[target_col],
         weight=weight,
         categorical_feature=categorical_cols or "auto",
+        params=dataset_params or None,
         free_raw_data=False,
         reference=reference,
     )
@@ -456,7 +471,6 @@ def suggest_search_params(trial: Any) -> dict[str, Any]:
         "lambda_l2": trial.suggest_float("lambda_l2", 1e-8, 10.0, log=True),
         "min_gain_to_split": trial.suggest_float("min_gain_to_split", 0.0, 1.0),
         "min_sum_hessian_in_leaf": trial.suggest_float("min_sum_hessian_in_leaf", 1e-3, 10.0, log=True),
-        "max_bin": trial.suggest_categorical("max_bin", [63, 127, 255]),
         "extra_trees": trial.suggest_categorical("extra_trees", [False, True]),
     }
 
@@ -468,6 +482,7 @@ def build_lgb_params(
     seed: int,
     num_threads: int,
     num_class: int,
+    max_bin: int = 127,
 ) -> dict[str, Any]:
     max_depth = int(search_params["max_depth"])
     raw_num_leaves = int(search_params["num_leaves"])
@@ -478,14 +493,13 @@ def build_lgb_params(
         "metric": metric,
         "boosting_type": "gbdt",
         "verbosity": -1,
-        "feature_pre_filter": False,
         "force_col_wise": True,
         "seed": seed,
-        "data_random_seed": seed,
         "feature_fraction_seed": seed,
         "bagging_seed": seed,
         "drop_seed": seed,
         "num_threads": num_threads,
+        "max_bin": int(max_bin),
         "learning_rate": float(search_params["learning_rate"]),
         "max_depth": max_depth,
         "num_leaves": num_leaves,
@@ -497,7 +511,6 @@ def build_lgb_params(
         "lambda_l2": float(search_params["lambda_l2"]),
         "min_gain_to_split": float(search_params["min_gain_to_split"]),
         "min_sum_hessian_in_leaf": float(search_params["min_sum_hessian_in_leaf"]),
-        "max_bin": int(search_params["max_bin"]),
         "extra_trees": bool(search_params["extra_trees"]),
     }
     if task == "multiclass":
@@ -528,6 +541,7 @@ def create_objective(
     num_boost_round: int,
     early_stopping_rounds: int,
     num_class: int,
+    max_bin: int,
     lgb: Any,
     optuna: Any,
 ) -> Any:
@@ -540,6 +554,7 @@ def create_objective(
             seed=seed,
             num_threads=num_threads,
             num_class=num_class,
+            max_bin=max_bin,
         )
         booster = lgb.train(
             params=params,
@@ -562,7 +577,7 @@ def create_objective(
 
 
 def create_study(optuna: Any, direction: str, seed: int, study_name: str, storage: str) -> Any:
-    sampler = optuna.samplers.TPESampler(seed=seed, multivariate=True, group=True)
+    sampler = optuna.samplers.TPESampler(seed=seed)
     pruner = optuna.pruners.MedianPruner(
         n_startup_trials=5,
         n_warmup_steps=50,
@@ -618,6 +633,8 @@ def run_phase(
     study_name: str,
     storage: str,
     seed_trials: list[dict[str, Any]] | None,
+    dataset_params: dict[str, Any],
+    max_bin: int,
     lgb: Any,
     optuna: Any,
     train_test_split: Any,
@@ -646,6 +663,7 @@ def run_phase(
         categorical_cols=categorical_cols,
         sample_weight_col=sample_weight_col,
         lgb=lgb,
+        dataset_params=dataset_params,
     )
     valid_set = build_dataset(
         frame=tune_valid_df,
@@ -655,6 +673,7 @@ def run_phase(
         sample_weight_col=sample_weight_col,
         lgb=lgb,
         reference=train_set,
+        dataset_params=dataset_params,
     )
 
     direction = infer_direction(metric)
@@ -678,6 +697,7 @@ def run_phase(
         num_boost_round=num_boost_round,
         early_stopping_rounds=early_stopping_rounds,
         num_class=num_class,
+        max_bin=max_bin,
         lgb=lgb,
         optuna=optuna,
     )
@@ -698,6 +718,7 @@ def run_phase(
             seed=seed,
             num_threads=num_threads,
             num_class=num_class,
+            max_bin=max_bin,
         ),
     )
     phase_summary = {
@@ -726,6 +747,7 @@ def calibrate_best_iteration(
     num_boost_round: int,
     early_stopping_rounds: int,
     metric: str,
+    dataset_params: dict[str, Any],
     lgb: Any,
 ) -> tuple[int, float]:
     train_set = build_dataset(
@@ -735,6 +757,7 @@ def calibrate_best_iteration(
         categorical_cols=categorical_cols,
         sample_weight_col=sample_weight_col,
         lgb=lgb,
+        dataset_params=dataset_params,
     )
     valid_set = build_dataset(
         frame=valid_df,
@@ -744,6 +767,7 @@ def calibrate_best_iteration(
         sample_weight_col=sample_weight_col,
         lgb=lgb,
         reference=train_set,
+        dataset_params=dataset_params,
     )
     booster = lgb.train(
         params=params,
@@ -768,6 +792,7 @@ def fit_final_model(
     sample_weight_col: str,
     params: dict[str, Any],
     num_boost_round: int,
+    dataset_params: dict[str, Any],
     pd: Any,
     lgb: Any,
 ) -> Any:
@@ -779,6 +804,7 @@ def fit_final_model(
         categorical_cols=categorical_cols,
         sample_weight_col=sample_weight_col,
         lgb=lgb,
+        dataset_params=dataset_params,
     )
     return lgb.train(
         params=params,
@@ -848,6 +874,7 @@ def main() -> None:
 
     metric = infer_metric(args.task, args.metric)
     num_threads = resolve_num_threads(args.num_threads, args.trial_parallelism)
+    dataset_params = {"max_bin": int(args.max_bin), "feature_pre_filter": False}
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -915,6 +942,8 @@ def main() -> None:
             study_name=args.study_name,
             storage=args.storage,
             seed_trials=None,
+            dataset_params=dataset_params,
+            max_bin=args.max_bin,
             lgb=lgb,
             optuna=optuna,
             train_test_split=train_test_split,
@@ -951,6 +980,8 @@ def main() -> None:
         study_name=args.study_name,
         storage=args.storage,
         seed_trials=phase2_seed_trials,
+        dataset_params=dataset_params,
+        max_bin=args.max_bin,
         lgb=lgb,
         optuna=optuna,
         train_test_split=train_test_split,
@@ -969,6 +1000,7 @@ def main() -> None:
         seed=args.seed,
         num_threads=num_threads,
         num_class=label_info["num_class"],
+        max_bin=args.max_bin,
     )
 
     calibrated_best_iteration, calibration_score = calibrate_best_iteration(
@@ -982,6 +1014,7 @@ def main() -> None:
         num_boost_round=args.num_boost_round,
         early_stopping_rounds=args.early_stopping_rounds,
         metric=metric,
+        dataset_params=dataset_params,
         lgb=lgb,
     )
     final_model = fit_final_model(
@@ -993,6 +1026,7 @@ def main() -> None:
         sample_weight_col=sample_weight_col,
         params=best_params,
         num_boost_round=calibrated_best_iteration,
+        dataset_params=dataset_params,
         pd=pd,
         lgb=lgb,
     )
