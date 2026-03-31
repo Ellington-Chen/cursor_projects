@@ -1,6 +1,15 @@
 import unittest
 
-from lightgbm_optuna_tuner import build_lgb_params, infer_direction, infer_metric, resolve_num_threads
+import pandas as pd
+
+from lightgbm_optuna_tuner import (
+    build_lgb_params,
+    infer_direction,
+    infer_metric,
+    infer_feature_columns,
+    resolve_num_threads,
+    split_dataframe_by_column,
+)
 
 
 class LightGBMOptunaTunerTests(unittest.TestCase):
@@ -41,6 +50,67 @@ class LightGBMOptunaTunerTests(unittest.TestCase):
     def test_resolve_num_threads_uses_at_least_one_thread(self) -> None:
         self.assertEqual(resolve_num_threads(3, 2), 3)
         self.assertGreaterEqual(resolve_num_threads(0, 999), 1)
+
+    def test_split_dataframe_by_column_returns_expected_frames(self) -> None:
+        df = pd.DataFrame(
+            [
+                {"split": "train", "target": 0},
+                {"split": "train", "target": 1},
+                {"split": "test", "target": 0},
+                {"split": "oot", "target": 1},
+            ]
+        )
+        train_df, valid_df, oot_df = split_dataframe_by_column(
+            df,
+            split_col="split",
+            train_values=("train",),
+            valid_values=("test",),
+            oot_values=("oot",),
+        )
+        self.assertEqual(len(train_df), 2)
+        self.assertEqual(len(valid_df), 1)
+        self.assertIsNotNone(oot_df)
+        self.assertEqual(len(oot_df), 1)
+
+    def test_split_dataframe_by_column_without_oot_returns_none(self) -> None:
+        df = pd.DataFrame(
+            [
+                {"split": "train", "target": 0},
+                {"split": "valid", "target": 1},
+            ]
+        )
+        train_df, valid_df, oot_df = split_dataframe_by_column(df)
+        self.assertEqual(len(train_df), 1)
+        self.assertEqual(len(valid_df), 1)
+        self.assertIsNone(oot_df)
+
+    def test_infer_feature_columns_excludes_custom_split_col(self) -> None:
+        train_df = pd.DataFrame(
+            {
+                "dataset_flag": ["train", "train"],
+                "target": [0, 1],
+                "f1": [1.0, 2.0],
+                "f2": [3.0, 4.0],
+            }
+        )
+        valid_df = pd.DataFrame(
+            {
+                "dataset_flag": ["valid"],
+                "target": [1],
+                "f1": [5.0],
+                "f2": [6.0],
+            }
+        )
+        feature_cols = infer_feature_columns(
+            train_df=train_df,
+            valid_df=valid_df,
+            oot_df=None,
+            target_col="target",
+            split_col="dataset_flag",
+            drop_cols=[],
+            sample_weight_col="",
+        )
+        self.assertEqual(feature_cols, ["f1", "f2"])
 
 
 if __name__ == "__main__":

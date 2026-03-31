@@ -74,6 +74,8 @@ python3 -m tests.test_amount_diff_checker
 
 新增了一个专门给 **LightGBM + Optuna** 用的调参脚本：`lightgbm_optuna_tuner.py`。
 
+除了 CLI，也支持直接在 notebook / Python 代码里调用函数接口。
+
 ### 适用场景
 
 - 只想调 LightGBM，不需要完整 AutoML
@@ -169,6 +171,75 @@ python3 lightgbm_optuna_tuner.py \
   --max-tune-valid-rows 120000 \
   --trial-parallelism 1 \
   --num-threads 4
+```
+
+### 函数版：适合 notebook / Python 脚本
+
+如果你更喜欢在 notebook 里直接传 DataFrame，可以这样用：
+
+```python
+from lightgbm_optuna_tuner import run_lightgbm_optuna
+
+result = run_lightgbm_optuna(
+    train_df=train_df,
+    valid_df=valid_df,
+    oot_df=oot_df,
+    target_col="target",
+    task="binary",
+    drop_cols=["user_id", "apply_time"],
+    categorical_cols=["city", "channel", "product_code"],
+    fast_phase_trials=12,
+    main_phase_trials=24,
+    fast_phase_train_rows=120000,
+    fast_phase_valid_rows=60000,
+    max_tune_train_rows=250000,
+    max_tune_valid_rows=120000,
+    trial_parallelism=1,
+    num_threads=4,
+    output_dir="artifacts/lgbm_optuna_notebook",
+)
+
+result.best_params
+result.summary
+result.feature_cols[:10]
+```
+
+如果你手里是一个总表，并且有 `split` 列，也可以直接这样：
+
+```python
+from lightgbm_optuna_tuner import run_lightgbm_optuna_from_df
+
+result = run_lightgbm_optuna_from_df(
+    df=all_df,
+    target_col="target",
+    split_col="split",
+    train_values=("train",),
+    valid_values=("test",),
+    oot_values=("oot",),
+    task="binary",
+    drop_cols=["user_id", "apply_time"],
+    categorical_cols=["city", "channel", "product_code"],
+    fast_phase_trials=12,
+    main_phase_trials=24,
+    trial_parallelism=1,
+    num_threads=4,
+)
+```
+
+返回对象 `result` 里主要有：
+
+- `result.model`
+- `result.best_params`
+- `result.summary`
+- `result.feature_cols`
+- `result.categorical_cols`
+- `result.phase_summaries`
+- `result.oot_score`
+
+另外还附带了一个 notebook 示例：
+
+```text
+examples/lightgbm_optuna_notebook_example.ipynb
 ```
 
 ### 输出产物

@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,26 @@ DEFAULT_OUTPUT_DIR = Path("artifacts/lgbm_optuna")
 DEFAULT_TRAIN_VALUES = "train"
 DEFAULT_VALID_VALUES = "valid,test,dev"
 DEFAULT_OOT_VALUES = "oot"
+
+
+@dataclass(slots=True)
+class LightGBMOptunaResult:
+    """Notebook-friendly result bundle returned by run_lightgbm_optuna()."""
+
+    model: Any
+    best_params: dict[str, Any]
+    summary: dict[str, Any]
+    feature_cols: list[str]
+    categorical_cols: list[str]
+    label_mapping: dict[str, int]
+    phase_summaries: list[dict[str, Any]]
+    studies: dict[str, Any | None]
+    artifact_paths: dict[str, str | None]
+    best_trial_number: int
+    best_tuning_value: float
+    calibrated_best_iteration: int
+    calibration_score: float
+    oot_score: float | None
 
 
 def parse_args() -> argparse.Namespace:
@@ -860,9 +882,105 @@ def save_trials_csv(study: Any, output_path: Path) -> None:
     study.trials_dataframe().to_csv(output_path, index=False)
 
 
-def main() -> None:
-    args = parse_args()
-    validate_args(args)
+def split_dataframe_by_column(
+    df: Any,
+    split_col: str = "split",
+    *,
+    train_values: Sequence[str] = (DEFAULT_TRAIN_VALUES,),
+    valid_values: Sequence[str] = ("valid", "test", "dev"),
+    oot_values: Sequence[str] = (DEFAULT_OOT_VALUES,),
+) -> tuple[Any, Any, Any | None]:
+    """Split a combined dataframe into train/valid/oot by a split column."""
+    if split_col not in df.columns:
+        raise KeyError(f"Split column '{split_col}' not found in dataframe.")
+
+    split_series = df[split_col].astype("string").str.strip().str.lower()
+    train_value_set = {str(value).strip().lower() for value in train_values}
+    valid_value_set = {str(value).strip().lower() for value in valid_values}
+    oot_value_set = {str(value).strip().lower() for value in oot_values}
+
+    train_df = df.loc[split_series.isin(train_value_set)].copy()
+    valid_df = df.loc[split_series.isin(valid_value_set)].copy()
+    oot_df = df.loc[split_series.isin(oot_value_set)].copy()
+    if oot_df.empty:
+        oot_df = None
+
+    if train_df.empty:
+        raise ValueError("Train split is empty after split_dataframe_by_column().")
+    if valid_df.empty:
+        raise ValueError("Valid split is empty after split_dataframe_by_column().")
+
+    return train_df, valid_df, oot_df
+
+
+def run_lightgbm_optuna_from_df(
+    df: Any,
+    *,
+    target_col: str,
+    split_col: str = "split",
+    train_values: Sequence[str] = (DEFAULT_TRAIN_VALUES,),
+    valid_values: Sequence[str] = ("valid", "test", "dev"),
+    oot_values: Sequence[str] = (DEFAULT_OOT_VALUES,),
+    **kwargs: Any,
+) -> LightGBMOptunaResult:
+    """Notebook-friendly wrapper for a single dataframe containing split labels."""
+    train_df, valid_df, oot_df = split_dataframe_by_column(
+        df,
+        split_col=split_col,
+        train_values=train_values,
+        valid_values=valid_values,
+        oot_values=oot_values,
+    )
+    return run_lightgbm_optuna(
+        train_df=train_df,
+        valid_df=valid_df,
+        oot_df=oot_df,
+        target_col=target_col,
+        split_col=split_col,
+        **kwargs,
+    )
+
+
+def run_lightgbm_optuna(
+    *,
+    train_df: Any,
+    valid_df: Any,
+    target_col: str,
+    task: str = "binary",
+    oot_df: Any | None = None,
+    split_col: str | None = None,
+    metric: str | None = None,
+    drop_cols: Sequence[str] = (),
+    categorical_cols: Sequence[str] = (),
+    sample_weight_col: str = "",
+    positive_label: str = "",
+    output_dir: str | Path = DEFAULT_OUTPUT_DIR,
+    seed: int = 42,
+    num_boost_round: int = 3000,
+    early_stopping_rounds: int = 120,
+    fast_phase_trials: int = 12,
+    main_phase_trials: int = 24,
+    fast_phase_train_rows: int = 120000,
+    fast_phase_valid_rows: int = 60000,
+    max_tune_train_rows: int = 250000,
+    max_tune_valid_rows: int = 120000,
+    trial_parallelism: int = 1,
+    num_threads: int = 0,
+    max_bin: int = 127,
+    study_name: str = "",
+    storage: str = "",
+    save_artifacts: bool = True,
+    verbose: bool = True,
+) -> LightGBMOptunaResult:
+    """Run LightGBM + Optuna tuning directly from dataframes.
+
+    This is the notebook-friendly API. Pass prepared train/valid/oot dataframes and
+    receive the fitted model, params, summaries, studies, and artifact paths.
+    """
+    if fast_phase_trials < 0 or main_phase_trials <= 0:
+        raise ValueError("Trial counts must satisfy fast_phase_trials >= 0 and main_phase_trials > 0.")
+    if trial_parallelism <= 0:
+        raise ValueError("trial_parallelism must be positive.")
 
     deps = lazy_import_dependencies()
     lgb = deps["lgb"]
@@ -872,157 +990,172 @@ def main() -> None:
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-    metric = infer_metric(args.task, args.metric)
-    num_threads = resolve_num_threads(args.num_threads, args.trial_parallelism)
-    dataset_params = {"max_bin": int(args.max_bin), "feature_pre_filter": False}
-    output_dir = args.output_dir.resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    metric = infer_metric(task, metric)
+    num_threads = resolve_num_threads(num_threads, trial_parallelism)
+    dataset_params = {"max_bin": int(max_bin), "feature_pre_filter": False}
+    output_dir = Path(output_dir).expanduser().resolve()
+    if save_artifacts:
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    train_df, valid_df, oot_df = load_frames(args, pd)
-    ensure_target_columns(args.task, args.target_col, train_df, valid_df, oot_df)
+    working_train_df = train_df.copy()
+    working_valid_df = valid_df.copy()
+    working_oot_df = oot_df.copy() if oot_df is not None else None
 
-    drop_cols = parse_csv_list(args.drop_cols)
-    categorical_cols_hint = parse_csv_list(args.categorical_cols)
-    sample_weight_col = args.sample_weight_col.strip()
+    ensure_target_columns(task, target_col, working_train_df, working_valid_df, working_oot_df)
+
+    drop_cols_list = list(drop_cols)
+    categorical_cols_hint = list(categorical_cols)
+    sample_weight_col = sample_weight_col.strip()
+    positive_label = positive_label.strip()
+
     label_info = encode_target_labels(
-        task=args.task,
-        target_col=args.target_col,
-        train_df=train_df,
-        valid_df=valid_df,
-        oot_df=oot_df,
-        positive_label=args.positive_label.strip(),
+        task=task,
+        target_col=target_col,
+        train_df=working_train_df,
+        valid_df=working_valid_df,
+        oot_df=working_oot_df,
+        positive_label=positive_label,
         pd=pd,
     )
     feature_cols = infer_feature_columns(
-        train_df=train_df,
-        valid_df=valid_df,
-        oot_df=oot_df,
-        target_col=args.target_col,
-        split_col=args.split_col,
-        drop_cols=drop_cols,
+        train_df=working_train_df,
+        valid_df=working_valid_df,
+        oot_df=working_oot_df,
+        target_col=target_col,
+        split_col=split_col or "",
+        drop_cols=drop_cols_list,
         sample_weight_col=sample_weight_col,
     )
-    categorical_cols = prepare_categorical_columns(
-        train_df=train_df,
-        valid_df=valid_df,
-        oot_df=oot_df,
+    resolved_categorical_cols = prepare_categorical_columns(
+        train_df=working_train_df,
+        valid_df=working_valid_df,
+        oot_df=working_oot_df,
         feature_cols=feature_cols,
         explicit_categorical_cols=categorical_cols_hint,
         pd=pd,
     )
 
     phase_summaries: list[dict[str, Any]] = []
-    phase_studies: list[Any] = []
+    phase_studies: dict[str, Any | None] = {"phase1_fast": None, "phase2_main": None}
     phase2_seed_trials: list[dict[str, Any]] | None = None
-    if args.fast_phase_trials > 0:
-        print(
-            f"[phase1_fast] tuning on train={min(len(train_df), args.fast_phase_train_rows)} "
-            f"valid={min(len(valid_df), args.fast_phase_valid_rows)} rows, "
-            f"trials={args.fast_phase_trials}"
-        )
+
+    phase1_trials_path = output_dir / "phase1_trials.csv"
+    phase2_trials_path = output_dir / "phase2_trials.csv"
+    best_params_path = output_dir / "best_params.json"
+    summary_path = output_dir / "summary.json"
+    model_path = output_dir / "lightgbm_model.txt"
+
+    if fast_phase_trials > 0:
+        if verbose:
+            print(
+                f"[phase1_fast] tuning on train={min(len(working_train_df), fast_phase_train_rows)} "
+                f"valid={min(len(working_valid_df), fast_phase_valid_rows)} rows, "
+                f"trials={fast_phase_trials}"
+            )
         phase1_study, phase1_summary = run_phase(
             phase_name="phase1_fast",
-            train_df=train_df,
-            valid_df=valid_df,
+            train_df=working_train_df,
+            valid_df=working_valid_df,
             feature_cols=feature_cols,
-            target_col=args.target_col,
-            categorical_cols=categorical_cols,
+            target_col=target_col,
+            categorical_cols=resolved_categorical_cols,
             sample_weight_col=sample_weight_col,
-            task=args.task,
+            task=task,
             metric=metric,
             num_class=label_info["num_class"],
-            max_train_rows=args.fast_phase_train_rows,
-            max_valid_rows=args.fast_phase_valid_rows,
-            trials=args.fast_phase_trials,
-            seed=args.seed,
+            max_train_rows=fast_phase_train_rows,
+            max_valid_rows=fast_phase_valid_rows,
+            trials=fast_phase_trials,
+            seed=seed,
             num_threads=num_threads,
-            num_boost_round=args.num_boost_round,
-            early_stopping_rounds=args.early_stopping_rounds,
-            trial_parallelism=args.trial_parallelism,
-            study_name=args.study_name,
-            storage=args.storage,
+            num_boost_round=num_boost_round,
+            early_stopping_rounds=early_stopping_rounds,
+            trial_parallelism=trial_parallelism,
+            study_name=study_name,
+            storage=storage,
             seed_trials=None,
             dataset_params=dataset_params,
-            max_bin=args.max_bin,
+            max_bin=max_bin,
             lgb=lgb,
             optuna=optuna,
             train_test_split=train_test_split,
         )
-        phase_studies.append(phase1_study)
+        phase_studies["phase1_fast"] = phase1_study
         phase_summaries.append(phase1_summary)
-        save_trials_csv(phase1_study, output_dir / "phase1_trials.csv")
+        if save_artifacts:
+            save_trials_csv(phase1_study, phase1_trials_path)
         phase2_seed_trials = [dict(trial.params) for trial in get_top_completed_trials(phase1_study, optuna, top_k=5)]
 
-    print(
-        f"[phase2_main] tuning on train={min(len(train_df), args.max_tune_train_rows)} "
-        f"valid={min(len(valid_df), args.max_tune_valid_rows)} rows, "
-        f"trials={args.main_phase_trials}"
-    )
+    if verbose:
+        print(
+            f"[phase2_main] tuning on train={min(len(working_train_df), max_tune_train_rows)} "
+            f"valid={min(len(working_valid_df), max_tune_valid_rows)} rows, "
+            f"trials={main_phase_trials}"
+        )
     phase2_study, phase2_summary = run_phase(
         phase_name="phase2_main",
-        train_df=train_df,
-        valid_df=valid_df,
+        train_df=working_train_df,
+        valid_df=working_valid_df,
         feature_cols=feature_cols,
-        target_col=args.target_col,
-        categorical_cols=categorical_cols,
+        target_col=target_col,
+        categorical_cols=resolved_categorical_cols,
         sample_weight_col=sample_weight_col,
-        task=args.task,
+        task=task,
         metric=metric,
         num_class=label_info["num_class"],
-        max_train_rows=args.max_tune_train_rows,
-        max_valid_rows=args.max_tune_valid_rows,
-        trials=args.main_phase_trials,
-        seed=args.seed + 100,
+        max_train_rows=max_tune_train_rows,
+        max_valid_rows=max_tune_valid_rows,
+        trials=main_phase_trials,
+        seed=seed + 100,
         num_threads=num_threads,
-        num_boost_round=args.num_boost_round,
-        early_stopping_rounds=args.early_stopping_rounds,
-        trial_parallelism=args.trial_parallelism,
-        study_name=args.study_name,
-        storage=args.storage,
+        num_boost_round=num_boost_round,
+        early_stopping_rounds=early_stopping_rounds,
+        trial_parallelism=trial_parallelism,
+        study_name=study_name,
+        storage=storage,
         seed_trials=phase2_seed_trials,
         dataset_params=dataset_params,
-        max_bin=args.max_bin,
+        max_bin=max_bin,
         lgb=lgb,
         optuna=optuna,
         train_test_split=train_test_split,
     )
-
-    phase_studies.append(phase2_study)
+    phase_studies["phase2_main"] = phase2_study
     phase_summaries.append(phase2_summary)
-    save_trials_csv(phase2_study, output_dir / "phase2_trials.csv")
+    if save_artifacts:
+        save_trials_csv(phase2_study, phase2_trials_path)
 
-    best_study = phase_studies[-1]
-    best_trial = get_best_completed_trial(best_study, optuna)
+    best_trial = get_best_completed_trial(phase2_study, optuna)
     best_params = build_lgb_params(
         search_params=dict(best_trial.params),
-        task=args.task,
+        task=task,
         metric=metric,
-        seed=args.seed,
+        seed=seed,
         num_threads=num_threads,
         num_class=label_info["num_class"],
-        max_bin=args.max_bin,
+        max_bin=max_bin,
     )
 
     calibrated_best_iteration, calibration_score = calibrate_best_iteration(
-        train_df=train_df,
-        valid_df=valid_df,
+        train_df=working_train_df,
+        valid_df=working_valid_df,
         feature_cols=feature_cols,
-        target_col=args.target_col,
-        categorical_cols=categorical_cols,
+        target_col=target_col,
+        categorical_cols=resolved_categorical_cols,
         sample_weight_col=sample_weight_col,
         params=best_params,
-        num_boost_round=args.num_boost_round,
-        early_stopping_rounds=args.early_stopping_rounds,
+        num_boost_round=num_boost_round,
+        early_stopping_rounds=early_stopping_rounds,
         metric=metric,
         dataset_params=dataset_params,
         lgb=lgb,
     )
     final_model = fit_final_model(
-        train_df=train_df,
-        valid_df=valid_df,
+        train_df=working_train_df,
+        valid_df=working_valid_df,
         feature_cols=feature_cols,
-        target_col=args.target_col,
-        categorical_cols=categorical_cols,
+        target_col=target_col,
+        categorical_cols=resolved_categorical_cols,
         sample_weight_col=sample_weight_col,
         params=best_params,
         num_boost_round=calibrated_best_iteration,
@@ -1030,16 +1163,19 @@ def main() -> None:
         pd=pd,
         lgb=lgb,
     )
-    model_path = output_dir / "lightgbm_model.txt"
-    final_model.save_model(str(model_path))
+    if save_artifacts:
+        final_model.save_model(str(model_path))
 
     oot_score = None
-    if oot_df is not None and args.target_col in oot_df.columns:
-        oot_pred = final_model.predict(oot_df.loc[:, feature_cols], num_iteration=final_model.current_iteration())
+    if working_oot_df is not None and target_col in working_oot_df.columns:
+        oot_pred = final_model.predict(
+            working_oot_df.loc[:, feature_cols],
+            num_iteration=final_model.current_iteration(),
+        )
         oot_score = evaluate_predictions(
-            task=args.task,
+            task=task,
             metric=metric,
-            y_true=oot_df[args.target_col],
+            y_true=working_oot_df[target_col],
             y_pred=oot_pred,
             accuracy_score=deps["accuracy_score"],
             log_loss=deps["log_loss"],
@@ -1048,57 +1184,148 @@ def main() -> None:
             roc_auc_score=deps["roc_auc_score"],
         )
 
-    best_params_path = output_dir / "best_params.json"
-    summary_path = output_dir / "summary.json"
-    save_json(
-        best_params_path,
-        {
-            "best_trial_number": int(best_trial.number),
-            "metric": metric,
-            "best_value": float(best_trial.value),
-            "calibrated_best_iteration": int(calibrated_best_iteration),
-            "params": best_params,
+    artifact_paths = {
+        "model_path": str(model_path) if save_artifacts else None,
+        "best_params_path": str(best_params_path) if save_artifacts else None,
+        "summary_path": str(summary_path) if save_artifacts else None,
+        "phase1_trials_csv": str(phase1_trials_path) if save_artifacts and fast_phase_trials > 0 else None,
+        "phase2_trials_csv": str(phase2_trials_path) if save_artifacts else None,
+    }
+    summary = {
+        "task": task,
+        "metric": metric,
+        "seed": seed,
+        "num_threads": num_threads,
+        "trial_parallelism": trial_parallelism,
+        "rows": {
+            "train": int(len(working_train_df)),
+            "valid": int(len(working_valid_df)),
+            "oot": int(len(working_oot_df)) if working_oot_df is not None else 0,
         },
-    )
-    save_json(
-        summary_path,
-        {
-            "task": args.task,
-            "metric": metric,
-            "seed": args.seed,
-            "num_threads": num_threads,
-            "trial_parallelism": args.trial_parallelism,
-            "rows": {
-                "train": int(len(train_df)),
-                "valid": int(len(valid_df)),
-                "oot": int(len(oot_df)) if oot_df is not None else 0,
+        "feature_count": len(feature_cols),
+        "categorical_feature_count": len(resolved_categorical_cols),
+        "categorical_features": resolved_categorical_cols,
+        "label_mapping": label_info["label_mapping"],
+        "phases": phase_summaries,
+        "best_trial_number": int(best_trial.number),
+        "best_tuning_value": float(best_trial.value),
+        "calibration_score": calibration_score,
+        "calibrated_best_iteration": int(calibrated_best_iteration),
+        "oot_score": oot_score,
+        "artifacts": artifact_paths,
+    }
+
+    if save_artifacts:
+        save_json(
+            best_params_path,
+            {
+                "best_trial_number": int(best_trial.number),
+                "metric": metric,
+                "best_value": float(best_trial.value),
+                "calibrated_best_iteration": int(calibrated_best_iteration),
+                "params": best_params,
             },
-            "feature_count": len(feature_cols),
-            "categorical_feature_count": len(categorical_cols),
-            "categorical_features": categorical_cols,
-            "label_mapping": label_info["label_mapping"],
-            "phases": phase_summaries,
-            "best_trial_number": int(best_trial.number),
-            "best_tuning_value": float(best_trial.value),
-            "calibration_score": calibration_score,
-            "calibrated_best_iteration": int(calibrated_best_iteration),
-            "oot_score": oot_score,
-            "artifacts": {
-                "model_path": str(model_path),
-                "best_params_path": str(best_params_path),
-                "summary_path": str(summary_path),
-                "phase1_trials_csv": str((output_dir / "phase1_trials.csv")) if args.fast_phase_trials > 0 else "",
-                "phase2_trials_csv": str(output_dir / "phase2_trials.csv"),
-            },
-        },
+        )
+        save_json(summary_path, summary)
+
+    if verbose:
+        if save_artifacts:
+            print(f"Done. Model saved to: {model_path}")
+            print(f"Summary saved to: {summary_path}")
+        print(f"Best metric on sampled tuning set: {best_trial.value:.6f}")
+        print(f"Best iteration calibrated on full train/valid: {calibrated_best_iteration}")
+        if oot_score is not None:
+            print(f"OOT {metric}: {oot_score:.6f}")
+
+    return LightGBMOptunaResult(
+        model=final_model,
+        best_params=best_params,
+        summary=summary,
+        feature_cols=feature_cols,
+        categorical_cols=resolved_categorical_cols,
+        label_mapping=label_info["label_mapping"],
+        phase_summaries=phase_summaries,
+        studies=phase_studies,
+        artifact_paths=artifact_paths,
+        best_trial_number=int(best_trial.number),
+        best_tuning_value=float(best_trial.value),
+        calibrated_best_iteration=int(calibrated_best_iteration),
+        calibration_score=float(calibration_score),
+        oot_score=None if oot_score is None else float(oot_score),
     )
 
-    print(f"Done. Model saved to: {model_path}")
-    print(f"Summary saved to: {summary_path}")
-    print(f"Best metric on sampled tuning set: {best_trial.value:.6f}")
-    print(f"Best iteration calibrated on full train/valid: {calibrated_best_iteration}")
-    if oot_score is not None:
-        print(f"OOT {metric}: {oot_score:.6f}")
+
+def run_lightgbm_optuna_from_split_df(
+    *,
+    df: Any,
+    target_col: str,
+    split_col: str = "split",
+    train_values: Sequence[str] = (DEFAULT_TRAIN_VALUES,),
+    valid_values: Sequence[str] = ("valid", "test", "dev"),
+    oot_values: Sequence[str] = (DEFAULT_OOT_VALUES,),
+    **kwargs: Any,
+) -> LightGBMOptunaResult:
+    """Alias of run_lightgbm_optuna_from_df() with a more explicit name."""
+    return run_lightgbm_optuna_from_df(
+        df=df,
+        target_col=target_col,
+        split_col=split_col,
+        train_values=train_values,
+        valid_values=valid_values,
+        oot_values=oot_values,
+        **kwargs,
+    )
+
+
+def main() -> None:
+    args = parse_args()
+    validate_args(args)
+
+    pd = lazy_import_dependencies()["pd"]
+    train_df, valid_df, oot_df = load_frames(args, pd)
+    run_lightgbm_optuna(
+        train_df=train_df,
+        valid_df=valid_df,
+        oot_df=oot_df,
+        target_col=args.target_col,
+        task=args.task,
+        split_col=args.split_col if args.data_path is not None else None,
+        metric=args.metric,
+        drop_cols=parse_csv_list(args.drop_cols),
+        categorical_cols=parse_csv_list(args.categorical_cols),
+        sample_weight_col=args.sample_weight_col,
+        positive_label=args.positive_label,
+        output_dir=args.output_dir,
+        seed=args.seed,
+        num_boost_round=args.num_boost_round,
+        early_stopping_rounds=args.early_stopping_rounds,
+        fast_phase_trials=args.fast_phase_trials,
+        main_phase_trials=args.main_phase_trials,
+        fast_phase_train_rows=args.fast_phase_train_rows,
+        fast_phase_valid_rows=args.fast_phase_valid_rows,
+        max_tune_train_rows=args.max_tune_train_rows,
+        max_tune_valid_rows=args.max_tune_valid_rows,
+        trial_parallelism=args.trial_parallelism,
+        num_threads=args.num_threads,
+        max_bin=args.max_bin,
+        study_name=args.study_name,
+        storage=args.storage,
+        save_artifacts=True,
+        verbose=True,
+    )
+
+
+__all__ = [
+    "LightGBMOptunaResult",
+    "build_lgb_params",
+    "infer_direction",
+    "infer_metric",
+    "resolve_num_threads",
+    "run_lightgbm_optuna",
+    "run_lightgbm_optuna_from_df",
+    "run_lightgbm_optuna_from_split_df",
+    "split_dataframe_by_column",
+]
 
 
 if __name__ == "__main__":
