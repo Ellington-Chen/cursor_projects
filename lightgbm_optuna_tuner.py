@@ -65,13 +65,12 @@ class _StudyProgressReporter:
         self._bar: Any | None = None
         self._last_reported_count = 0
         self._text_step = max(1, total_trials // 10) if total_trials > 0 else 1
+        self._text_started = False
 
         if not self.enabled:
             return
         if TQDM_AVAILABLE:
             self._bar = tqdm(total=total_trials, desc=phase_name, leave=True)
-        else:
-            print(f"{phase_name}: 0/{total_trials} trials")
 
     def __call__(self, study: Any, trial: Any) -> None:
         del trial
@@ -98,6 +97,8 @@ class _StudyProgressReporter:
         if should_report:
             best_text = "n/a" if self.best_value is None else f"{self.best_value:.6f}"
             elapsed = time.time() - self.start_time
+            if not self._text_started:
+                self._text_started = True
             print(
                 f"{self.phase_name}: {completed_count}/{self.total_trials} trials, "
                 f"best={best_text}, elapsed={elapsed:.1f}s"
