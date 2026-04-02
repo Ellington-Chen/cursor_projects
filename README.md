@@ -304,6 +304,51 @@ result = run_lightgbm_random_search(
 - `show_progress=False`：关闭进度展示
 - 安装了 `tqdm` 时优先显示进度条；否则自动退化成文本进度
 
+### 从你原始 backward feature selection 的第一轮之后继续跑
+
+如果你想尽量保持最开始那段代码的风格，只是假设：
+
+- 第一轮 fixed params 已经跑完
+- 无用变量已经删掉
+- 你手里已经有删完后的变量列表
+
+那么可以直接用这个更贴近原始流程的入口：
+
+```python
+from lightgbm_resume_after_first_round import run_backward_selection_after_first_round
+
+selected_features = ["f1", "f2", "f3", "f4"]
+
+result = run_backward_selection_after_first_round(
+    X_train=X_train,
+    y_train=y_train,
+    X_val=X_val,
+    y_val=y_val,
+    X_oot=X_oot,
+    y_oot=y_oot,
+    selected_features=selected_features,
+    task_type="classification",
+    n_random_search_iter=20,
+    random_search_cv=3,
+    random_search_n_jobs=8,
+    model_n_jobs=8,
+    show_progress=True,
+)
+
+result.best_params
+result.model
+result.metricsTest
+result.metricsOOT
+result.feature_importance_df
+```
+
+这版会直接从你原代码里的 `RandomizedSearchCV` 开始：
+
+- 先做随机搜索
+- 再用最优参数训练 LightGBM
+- 再输出 train / test / oot 的指标
+- 再返回特征重要性
+
 另外还附带了一个 notebook 示例：
 
 ```text
