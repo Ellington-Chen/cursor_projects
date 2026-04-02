@@ -244,6 +244,58 @@ result = run_lightgbm_optuna_from_df(
 - `result.phase_summaries`
 - `result.oot_score`
 
+### 只跑一轮随机超参搜索：适合“变量已经选好”
+
+如果你已经完成变量筛选，不想再跑完整的特征选择流程，只想复用你原先
+`RandomizedSearchCV` 那套搜索范围单独搜一轮参数，可以直接这样：
+
+```python
+from lightgbm_optuna_tuner import run_lightgbm_random_search_from_df
+
+selected_features = ["f1", "f2", "f3", "f4"]
+
+result = run_lightgbm_random_search_from_df(
+    train_df=train_df,
+    target_col="target",
+    feature_cols=selected_features,
+    task_type="classification",  # 或 "regression"
+    n_iter=20,                   # 和你原代码默认一致
+    cv=3,
+    search_n_jobs=8,
+    model_n_jobs=8,
+    random_state=2025,
+)
+
+result.best_params
+result.best_score
+result.best_model_params
+```
+
+这个接口默认复用了你原代码里的搜索空间：
+
+- `num_leaves`: `randint(4, 10)`
+- `max_bin`: `200~2000`, 步长 `100`
+- `max_depth`: `randint(2, 4)`
+- `n_estimators`: `20~300`, 步长 `20`
+- `scale_pos_weight`: `[0.8, 1]`
+- `learning_rate`: `uniform(0.004, 0.05)`
+- `min_child_samples`: `2000~14000`, 步长 `500`
+- `subsample`: `uniform(0.7, 0.3)`
+- `colsample_bytree`: `uniform(0.7, 0.3)`
+- `reg_alpha`: `uniform(0.0001, 10)`
+
+如果你已经自己切好了 `X_train` / `y_train`，也可以直接调用：
+
+```python
+from lightgbm_optuna_tuner import run_lightgbm_random_search
+
+result = run_lightgbm_random_search(
+    X_train[selected_features],
+    y_train,
+    task_type="classification",
+)
+```
+
 另外还附带了一个 notebook 示例：
 
 ```text
