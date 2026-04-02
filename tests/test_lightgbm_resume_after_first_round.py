@@ -1,11 +1,13 @@
 import io
 import unittest
 from contextlib import redirect_stdout
+from unittest.mock import patch
 
 import pandas as pd
 
 import lightgbm_resume_after_first_round
 from lightgbm_resume_after_first_round import (
+    _train_lgb_model_compat,
     get_backward_selection_random_search_space,
     run_backward_selection_after_first_round,
 )
@@ -96,6 +98,36 @@ class LightGBMResumeAfterFirstRoundTests(unittest.TestCase):
         self.assertIsNotNone(result.model)
         self.assertIn("random_search_after_first_round: starting", progress_output)
         self.assertIn("best_score=", progress_output)
+
+    def test_train_lgb_model_compat_falls_back_when_verbose_false_unsupported(self) -> None:
+        class FakeLightGBM:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            def early_stopping(self, stopping_rounds: int, verbose: bool = True) -> tuple[int, bool]:
+                return (stopping_rounds, verbose)
+
+            def train(self, params: dict[str, object], train_data: object, **kwargs: object) -> str:
+                self.calls.append({"params": params, "kwargs": kwargs})
+                callbacks = kwargs.get("callbacks")
+                if callbacks == [(20, False)]:
+                    raise TypeError("early_stopping(verbose=False) unsupported")
+                return "trained_model"
+
+        fake_lgb = FakeLightGBM()
+        model = _train_lgb_model_compat(
+            fake_lgb,
+            {"objective": "binary", "verbose": -1},
+            train_data=object(),
+            valid_data=object(),
+            num_boost_round=100,
+            stopping_rounds=20,
+        )
+
+        self.assertEqual(model, "trained_model")
+        self.assertEqual(len(fake_lgb.calls), 2)
+        self.assertEqual(fake_lgb.calls[0]["kwargs"]["callbacks"], [(20, False)])
+        self.assertEqual(fake_lgb.calls[1]["kwargs"]["callbacks"], [(20, True)])
 
 
 if __name__ == "__main__":

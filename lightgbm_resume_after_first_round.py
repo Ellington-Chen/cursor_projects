@@ -215,6 +215,58 @@ def _get_lgb_train_flags() -> tuple[bool, bool]:
         return True, True
 
 
+def _train_lgb_model_compat(
+    lgb: Any,
+    model_params: dict[str, Any],
+    train_data: Any,
+    valid_data: Any,
+    *,
+    num_boost_round: int = 100,
+    stopping_rounds: int = 20,
+) -> Any:
+    """Train LightGBM with fallback paths for version/API differences."""
+    train_attempts: list[dict[str, Any]] = [
+        {
+            "params": {**model_params, "verbose": -1},
+            "kwargs": {
+                "num_boost_round": num_boost_round,
+                "valid_sets": [valid_data],
+                "callbacks": [lgb.early_stopping(stopping_rounds=stopping_rounds, verbose=False)],
+            },
+        },
+        {
+            "params": model_params,
+            "kwargs": {
+                "num_boost_round": num_boost_round,
+                "valid_sets": [valid_data],
+                "callbacks": [lgb.early_stopping(stopping_rounds=stopping_rounds)],
+            },
+        },
+        {
+            "params": model_params,
+            "kwargs": {
+                "num_boost_round": num_boost_round,
+                "valid_sets": [valid_data],
+            },
+        },
+    ]
+
+    last_error: Exception | None = None
+    for attempt in train_attempts:
+        try:
+            return lgb.train(
+                attempt["params"],
+                train_data,
+                **attempt["kwargs"],
+            )
+        except TypeError as exc:
+            last_error = exc
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Unexpected failure while training LightGBM model.")
+
+
 def run_backward_selection_after_first_round(
     X_train: pd.DataFrame,
     y_train: Any,
@@ -341,28 +393,15 @@ def run_backward_selection_after_first_round(
     )
 
     gc.collect()
-    lgbm_use_callbacks, lgbm_feature_importance_compat = _get_lgb_train_flags()
-
-    if lgbm_use_callbacks:
-        callbacks = [lgb.early_stopping(stopping_rounds=20, verbose=False)]
-        model_params_copy = model_params.copy()
-        model_params_copy["verbose"] = -1
-        model = lgb.train(
-            model_params_copy,
-            train_data,
-            num_boost_round=100,
-            valid_sets=[valid_data],
-            callbacks=callbacks,
-        )
-    else:
-        model = lgb.train(
-            model_params,
-            train_data,
-            num_boost_round=100,
-            valid_sets=[valid_data],
-            early_stopping_rounds=20,
-            verbose_eval=False,
-        )
+    _lgbm_use_callbacks, lgbm_feature_importance_compat = _get_lgb_train_flags()
+    model = _train_lgb_model_compat(
+        lgb,
+        model_params,
+        train_data,
+        valid_data,
+        num_boost_round=100,
+        stopping_rounds=20,
+    )
 
     predtrain = model.predict(X_train[current_features])
     predtest = model.predict(X_val[current_features])
