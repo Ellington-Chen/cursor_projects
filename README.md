@@ -250,7 +250,7 @@ result = run_lightgbm_optuna_from_df(
 `RandomizedSearchCV` 那套搜索范围单独搜一轮参数，可以直接这样：
 
 ```python
-from lightgbm_optuna_tuner import run_lightgbm_random_search_from_df
+from lightgbm_random_search import run_lightgbm_random_search_from_df
 
 selected_features = ["f1", "f2", "f3", "f4"]
 
@@ -287,7 +287,7 @@ result.best_model_params
 如果你已经自己切好了 `X_train` / `y_train`，也可以直接调用：
 
 ```python
-from lightgbm_optuna_tuner import run_lightgbm_random_search
+from lightgbm_random_search import run_lightgbm_random_search
 
 result = run_lightgbm_random_search(
     X_train[selected_features],
