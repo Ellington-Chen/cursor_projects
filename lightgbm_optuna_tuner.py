@@ -25,7 +25,7 @@ DEFAULT_VALID_VALUES = "valid,test,dev"
 DEFAULT_OOT_VALUES = "oot"
 
 
-@dataclass(slots=True)
+@dataclass
 class LightGBMOptunaResult:
     """Notebook-friendly result bundle returned by run_lightgbm_optuna()."""
 

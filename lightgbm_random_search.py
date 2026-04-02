@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 
-@dataclass(slots=True)
+@dataclass
 class LightGBMRandomSearchResult:
     """Notebook-friendly result bundle returned by run_lightgbm_random_search()."""
 
