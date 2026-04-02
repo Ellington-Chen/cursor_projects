@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
+
+try:
+    from tqdm.auto import tqdm
+
+    TQDM_AVAILABLE = True
+except ImportError:
+    tqdm = None
+    TQDM_AVAILABLE = False
 
 
 @dataclass
@@ -17,6 +27,131 @@ class LightGBMRandomSearchResult:
     best_model_params: dict[str, Any]
     feature_cols: list[str]
     scoring: str
+
+
+class _RandomSearchProgressReporter:
+    """Notebook / terminal friendly progress reporter for RandomizedSearchCV."""
+
+    def __init__(
+        self,
+        *,
+        description: str,
+        total_fits: int,
+        total_candidates: int,
+        cv_splits: int,
+        enabled: bool,
+    ) -> None:
+        self.description = description
+        self.total_fits = max(0, int(total_fits))
+        self.total_candidates = max(0, int(total_candidates))
+        self.cv_splits = max(1, int(cv_splits))
+        self.enabled = enabled and self.total_fits > 0
+        self.completed_fits = 0
+        self.start_time = time.time()
+        self._bar: Any | None = None
+        self._last_reported = 0
+        self._text_step = max(1, self.total_fits // 10) if self.total_fits > 0 else 1
+
+        if not self.enabled:
+            return
+        if TQDM_AVAILABLE:
+            self._bar = tqdm(total=self.total_fits, desc=description, leave=True)
+        else:
+            print(
+                f"{description}: starting {self.total_fits} CV fit(s) across "
+                f"{self.total_candidates} candidate(s) (cv={self.cv_splits})"
+            )
+
+    def update(self, count: int) -> None:
+        if not self.enabled or count <= 0:
+            return
+
+        self.completed_fits = min(self.total_fits, self.completed_fits + int(count))
+        completed_candidates = min(self.total_candidates, self.completed_fits // self.cv_splits)
+
+        if self._bar is not None:
+            increment = self.completed_fits - self._bar.n
+            if increment > 0:
+                self._bar.update(increment)
+            self._bar.set_postfix(
+                {"candidates": f"{completed_candidates}/{self.total_candidates}"},
+                refresh=False,
+            )
+            return
+
+        should_report = (
+            self.completed_fits == self.total_fits
+            or self.completed_fits == 1
+            or (self.completed_fits - self._last_reported) >= self._text_step
+        )
+        if should_report:
+            elapsed = time.time() - self.start_time
+            print(
+                f"{self.description}: {self.completed_fits}/{self.total_fits} CV fit(s), "
+                f"candidates~{completed_candidates}/{self.total_candidates}, elapsed={elapsed:.1f}s"
+            )
+            self._last_reported = self.completed_fits
+
+    def close(self, *, best_score: float | None = None, refit: bool) -> None:
+        if not self.enabled:
+            return
+
+        completed_candidates = min(self.total_candidates, self.completed_fits // self.cv_splits)
+        best_text = "n/a" if best_score is None else f"{best_score:.6f}"
+        refit_text = "done" if refit else "skipped"
+
+        if self._bar is not None:
+            self._bar.set_postfix(
+                {
+                    "candidates": f"{completed_candidates}/{self.total_candidates}",
+                    "best": best_text,
+                    "refit": refit_text,
+                },
+                refresh=False,
+            )
+            self._bar.close()
+            return
+
+        elapsed = time.time() - self.start_time
+        print(
+            f"{self.description}: done, best_score={best_text}, "
+            f"refit={refit_text}, elapsed={elapsed:.1f}s"
+        )
+
+
+def _resolve_cv_split_count(cv: int | Any, X_train: Any, y_train: Any, task_type: str) -> int:
+    if isinstance(cv, int):
+        return cv
+
+    try:
+        from sklearn.model_selection import check_cv
+
+        cv_splitter = check_cv(cv, y=y_train, classifier=(task_type == "classification"))
+        return int(cv_splitter.get_n_splits(X_train, y_train))
+    except Exception:
+        return 1
+
+
+@contextmanager
+def _joblib_progress(reporter: _RandomSearchProgressReporter) -> Any:
+    if not reporter.enabled:
+        yield
+        return
+
+    import joblib
+
+    previous_callback = joblib.parallel.BatchCompletionCallBack
+
+    class _PatchedBatchCompletionCallBack(previous_callback):
+        def __call__(self, *args: Any, **kwargs: Any) -> Any:
+            reporter.update(getattr(self, "batch_size", 1))
+            return super().__call__(*args, **kwargs)
+
+    joblib.parallel.BatchCompletionCallBack = _PatchedBatchCompletionCallBack
+    try:
+        yield
+    finally:
+        joblib.parallel.BatchCompletionCallBack = previous_callback
 
 
 def lazy_import_dependencies() -> dict[str, Any]:
@@ -80,6 +215,7 @@ def run_lightgbm_random_search(
     random_state: int = 2025,
     sample_weight: Any | None = None,
     refit: bool = True,
+    show_progress: bool = True,
 ) -> LightGBMRandomSearchResult:
     """Run one RandomizedSearchCV pass using the original BFS search space."""
     if task_type not in {"classification", "regression"}:
@@ -118,7 +254,23 @@ def run_lightgbm_random_search(
     if sample_weight is not None:
         fit_kwargs["sample_weight"] = sample_weight
 
-    random_search.fit(X_train, y_train, **fit_kwargs)
+    cv_splits = _resolve_cv_split_count(cv, X_train, y_train, task_type)
+    progress_reporter = _RandomSearchProgressReporter(
+        description="random_search",
+        total_fits=max(0, int(n_iter)) * max(1, cv_splits),
+        total_candidates=max(0, int(n_iter)),
+        cv_splits=cv_splits,
+        enabled=show_progress,
+    )
+
+    try:
+        with _joblib_progress(progress_reporter):
+            random_search.fit(X_train, y_train, **fit_kwargs)
+    except Exception:
+        progress_reporter.close(best_score=None, refit=False)
+        raise
+
+    progress_reporter.close(best_score=float(random_search.best_score_), refit=refit)
 
     feature_cols = list(X_train.columns) if hasattr(X_train, "columns") else []
     best_params = dict(random_search.best_params_)
@@ -152,6 +304,7 @@ def run_lightgbm_random_search_from_df(
     model_n_jobs: int = 8,
     random_state: int = 2025,
     refit: bool = True,
+    show_progress: bool = True,
 ) -> LightGBMRandomSearchResult:
     """DataFrame wrapper for one-off RandomizedSearchCV tuning on selected features."""
     if target_col not in train_df.columns:
@@ -188,6 +341,7 @@ def run_lightgbm_random_search_from_df(
         random_state=random_state,
         sample_weight=sample_weight,
         refit=refit,
+        show_progress=show_progress,
     )
 
 

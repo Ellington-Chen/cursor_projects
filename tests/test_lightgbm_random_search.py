@@ -1,7 +1,10 @@
+import io
 import unittest
+from contextlib import redirect_stdout
 
 import pandas as pd
 
+import lightgbm_random_search
 from lightgbm_random_search import (
     build_backward_selection_random_search_space,
     infer_random_search_scoring,
@@ -10,6 +13,17 @@ from lightgbm_random_search import (
 
 
 class LightGBMRandomSearchTests(unittest.TestCase):
+    def _build_train_df(self) -> pd.DataFrame:
+        row_count = 120
+        return pd.DataFrame(
+            {
+                "target": [index % 2 for index in range(row_count)],
+                "f1": [float(index) for index in range(row_count)],
+                "f2": [float((index * 3) % 11) for index in range(row_count)],
+                "unused": [float(index % 5) for index in range(row_count)],
+            }
+        )
+
     def test_metric_helpers_return_expected_defaults(self) -> None:
         self.assertEqual(infer_random_search_scoring("classification"), "roc_auc")
         self.assertEqual(infer_random_search_scoring("regression"), "neg_mean_squared_error")
@@ -59,15 +73,7 @@ class LightGBMRandomSearchTests(unittest.TestCase):
         self.assertLess(reg_alpha_sample, 10.0001)
 
     def test_run_lightgbm_random_search_from_df_runs_single_search_round(self) -> None:
-        row_count = 120
-        train_df = pd.DataFrame(
-            {
-                "target": [index % 2 for index in range(row_count)],
-                "f1": [float(index) for index in range(row_count)],
-                "f2": [float((index * 3) % 11) for index in range(row_count)],
-                "unused": [float(index % 5) for index in range(row_count)],
-            }
-        )
+        train_df = self._build_train_df()
 
         result = run_lightgbm_random_search_from_df(
             train_df,
@@ -88,6 +94,54 @@ class LightGBMRandomSearchTests(unittest.TestCase):
         self.assertEqual(result.best_model_params["metric"], "auc")
         self.assertEqual(result.best_model_params["n_jobs"], 1)
         self.assertIsInstance(result.best_score, float)
+
+    def test_run_lightgbm_random_search_prints_text_progress_without_tqdm(self) -> None:
+        train_df = self._build_train_df()
+        previous_value = lightgbm_random_search.TQDM_AVAILABLE
+        lightgbm_random_search.TQDM_AVAILABLE = False
+        buffer = io.StringIO()
+
+        try:
+            with redirect_stdout(buffer):
+                result = run_lightgbm_random_search_from_df(
+                    train_df,
+                    target_col="target",
+                    feature_cols=["f1", "f2"],
+                    n_iter=1,
+                    cv=2,
+                    search_n_jobs=1,
+                    model_n_jobs=1,
+                    random_state=7,
+                    show_progress=True,
+                )
+        finally:
+            lightgbm_random_search.TQDM_AVAILABLE = previous_value
+
+        progress_output = buffer.getvalue()
+        self.assertIsNotNone(result.best_estimator)
+        self.assertIn("random_search: starting", progress_output)
+        self.assertIn("best_score=", progress_output)
+        self.assertIn("refit=done", progress_output)
+
+    def test_run_lightgbm_random_search_can_disable_progress_output(self) -> None:
+        train_df = self._build_train_df()
+        buffer = io.StringIO()
+
+        with redirect_stdout(buffer):
+            result = run_lightgbm_random_search_from_df(
+                train_df,
+                target_col="target",
+                feature_cols=["f1", "f2"],
+                n_iter=1,
+                cv=2,
+                search_n_jobs=1,
+                model_n_jobs=1,
+                random_state=7,
+                show_progress=False,
+            )
+
+        self.assertIsNotNone(result.best_estimator)
+        self.assertEqual(buffer.getvalue(), "")
 
 
 if __name__ == "__main__":

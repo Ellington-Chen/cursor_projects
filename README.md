@@ -264,6 +264,7 @@ result = run_lightgbm_random_search_from_df(
     search_n_jobs=8,
     model_n_jobs=8,
     random_state=2025,
+    show_progress=True,
 )
 
 result.best_params
@@ -293,8 +294,15 @@ result = run_lightgbm_random_search(
     X_train[selected_features],
     y_train,
     task_type="classification",
+    show_progress=True,
 )
 ```
+
+进度展示说明：
+
+- `show_progress=True`：显示随机搜索进度
+- `show_progress=False`：关闭进度展示
+- 安装了 `tqdm` 时优先显示进度条；否则自动退化成文本进度
 
 另外还附带了一个 notebook 示例：
 
