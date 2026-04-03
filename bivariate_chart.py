@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 
 DEFAULT_MISSING_LABEL = "Missing"
+DEFAULT_ZERO_BIN_LABEL = "0"
 
 
 @dataclass(slots=True)
@@ -21,6 +22,7 @@ class BivariateChartResult:
     requested_bin_count: int
     actual_bin_count: int
     missing_label: str
+    zero_bin_label: str
     bin_edges: list[float]
 
 
@@ -48,15 +50,27 @@ def _build_interval_labels(bin_edges: list[float], *, precision: int) -> list[st
     return labels
 
 
-def _build_interval_rule(actual_bin_count: int, missing_label: str) -> str:
+def _build_interval_rule(
+    actual_bin_count: int,
+    *,
+    missing_label: str,
+    zero_bin_label: str,
+    has_zero_bin: bool,
+) -> str:
     if actual_bin_count <= 0:
-        return f"{missing_label} is shown as a standalone bin."
-    return (
-        f"{missing_label} is shown as a standalone bin. "
-        "Non-missing values use approximately equal-frequency bins. "
-        "The first bin is left-closed and right-closed: [a, b]. "
-        "Later bins are left-open and right-closed: (b, c]."
-    )
+        special_rules = [f"{missing_label} is shown as a standalone bin."]
+        if has_zero_bin:
+            special_rules.append(f"{zero_bin_label} is shown as a standalone bin.")
+        return " ".join(special_rules)
+
+    special_rules = [f"{missing_label} is shown as a standalone bin."]
+    if has_zero_bin:
+        special_rules.append(f"{zero_bin_label} is shown as a standalone bin.")
+
+    special_rules.append("All remaining non-missing, non-zero values use approximately equal-frequency bins.")
+    special_rules.append("The first interval bin is left-closed and right-closed: [a, b].")
+    special_rules.append("Later interval bins are left-open and right-closed: (b, c].")
+    return " ".join(special_rules)
 
 
 def build_bivariate_summary(
@@ -66,6 +80,7 @@ def build_bivariate_summary(
     target_col: str,
     n_bins: int = 6,
     missing_label: str = DEFAULT_MISSING_LABEL,
+    zero_bin_label: str = DEFAULT_ZERO_BIN_LABEL,
     precision: int = 6,
 ) -> BivariateChartResult:
     """Build bivariate summary data for a numeric feature against a numeric target."""
@@ -94,10 +109,16 @@ def build_bivariate_summary(
             feature_col=feature_col,
             target_col=target_col,
             summary=pd.DataFrame(columns=summary_columns),
-            interval_rule=_build_interval_rule(actual_bin_count=0, missing_label=missing_label),
+            interval_rule=_build_interval_rule(
+                actual_bin_count=0,
+                missing_label=missing_label,
+                zero_bin_label=zero_bin_label,
+                has_zero_bin=False,
+            ),
             requested_bin_count=n_bins,
             actual_bin_count=0,
             missing_label=missing_label,
+            zero_bin_label=zero_bin_label,
             bin_edges=[],
         )
 
@@ -110,7 +131,8 @@ def build_bivariate_summary(
         )
 
     missing_mask = numeric_feature.isna()
-    non_missing_feature = numeric_feature.loc[~missing_mask]
+    zero_mask = (~missing_mask) & (numeric_feature == 0)
+    interval_feature = numeric_feature.loc[(~missing_mask) & (~zero_mask)]
 
     bin_labels = pd.Series(index=df.index, dtype=object)
     metadata_rows: list[dict[str, Any]] = []
@@ -118,6 +140,7 @@ def build_bivariate_summary(
     interval_labels: list[str] = []
     bin_edges: list[float] = []
     actual_bin_count = 0
+    has_zero_bin = False
 
     if missing_mask.any():
         category_order.append(missing_label)
@@ -133,10 +156,25 @@ def build_bivariate_summary(
         )
         bin_labels.loc[missing_mask] = missing_label
 
-    if not non_missing_feature.empty:
-        unique_value_count = int(non_missing_feature.nunique(dropna=True))
+    if zero_mask.any():
+        has_zero_bin = True
+        category_order.append(zero_bin_label)
+        metadata_rows.append(
+            {
+                "bin": zero_bin_label,
+                "is_missing": False,
+                "left_endpoint": 0.0,
+                "right_endpoint": 0.0,
+                "left_closed": True,
+                "right_closed": True,
+            }
+        )
+        bin_labels.loc[zero_mask] = zero_bin_label
+
+    if not interval_feature.empty:
+        unique_value_count = int(interval_feature.nunique(dropna=True))
         if unique_value_count == 1:
-            only_value = float(non_missing_feature.iloc[0])
+            only_value = float(interval_feature.iloc[0])
             interval_labels = [
                 f"[{_format_number(only_value, precision)}, {_format_number(only_value, precision)}]"
             ]
@@ -144,7 +182,7 @@ def build_bivariate_summary(
         else:
             requested_bin_count = min(n_bins, unique_value_count)
             quantile_codes, raw_edges = pd.qcut(
-                non_missing_feature,
+                interval_feature,
                 q=requested_bin_count,
                 labels=False,
                 retbins=True,
@@ -152,13 +190,13 @@ def build_bivariate_summary(
             )
             bin_edges = [float(edge) for edge in raw_edges]
             interval_labels = _build_interval_labels(bin_edges, precision=precision)
-            quantile_codes = pd.Series(quantile_codes, index=non_missing_feature.index)
-            bin_labels.loc[non_missing_feature.index] = quantile_codes.map(
+            quantile_codes = pd.Series(quantile_codes, index=interval_feature.index)
+            bin_labels.loc[interval_feature.index] = quantile_codes.map(
                 lambda code: interval_labels[int(code)]
             )
 
         if unique_value_count == 1:
-            bin_labels.loc[non_missing_feature.index] = interval_labels[0]
+            bin_labels.loc[interval_feature.index] = interval_labels[0]
 
         actual_bin_count = len(interval_labels)
         category_order.extend(interval_labels)
@@ -205,10 +243,16 @@ def build_bivariate_summary(
         feature_col=feature_col,
         target_col=target_col,
         summary=summary,
-        interval_rule=_build_interval_rule(actual_bin_count=actual_bin_count, missing_label=missing_label),
+        interval_rule=_build_interval_rule(
+            actual_bin_count=actual_bin_count,
+            missing_label=missing_label,
+            zero_bin_label=zero_bin_label,
+            has_zero_bin=has_zero_bin,
+        ),
         requested_bin_count=n_bins,
         actual_bin_count=actual_bin_count,
         missing_label=missing_label,
+        zero_bin_label=zero_bin_label,
         bin_edges=bin_edges,
     )
 
@@ -279,6 +323,7 @@ def build_and_plot_bivariate_chart(
     target_col: str,
     n_bins: int = 6,
     missing_label: str = DEFAULT_MISSING_LABEL,
+    zero_bin_label: str = DEFAULT_ZERO_BIN_LABEL,
     precision: int = 6,
     title: str | None = None,
     figsize: tuple[int, int] = (12, 6),
@@ -294,6 +339,7 @@ def build_and_plot_bivariate_chart(
         target_col=target_col,
         n_bins=n_bins,
         missing_label=missing_label,
+        zero_bin_label=zero_bin_label,
         precision=precision,
     )
     figure_and_axes = plot_bivariate_chart(
@@ -311,6 +357,7 @@ def build_and_plot_bivariate_chart(
 __all__ = [
     "BivariateChartResult",
     "DEFAULT_MISSING_LABEL",
+    "DEFAULT_ZERO_BIN_LABEL",
     "build_and_plot_bivariate_chart",
     "build_bivariate_summary",
     "plot_bivariate_chart",
