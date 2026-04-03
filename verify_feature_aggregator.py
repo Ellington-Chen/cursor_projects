@@ -89,6 +89,7 @@ def add_verify_all_source_group_features(
         .fillna(fill_value)
     )
 
+    aggregated_columns: dict[str, pd.Series] = {}
     for card_type in card_types:
         for result_type in result_types:
             for metric in metrics:
@@ -98,6 +99,7 @@ def add_verify_all_source_group_features(
                         build_verify_feature_name(card_type, source_group, result_type, metric, day_window)
                         for source_group in source_groups
                     ]
-                    result_df[target_col] = numeric_source_df.loc[:, source_cols].sum(axis=1)
+                    aggregated_columns[target_col] = numeric_source_df.loc[:, source_cols].sum(axis=1)
 
-    return result_df
+    aggregated_df = pd.DataFrame(aggregated_columns, index=result_df.index)
+    return pd.concat([result_df, aggregated_df], axis=1)
