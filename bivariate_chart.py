@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,17 @@ class BivariateChartResult:
     bin_edges: list[float]
 
 
+@dataclass(slots=True)
+class BivariateBatchChartItem:
+    """One batch-generated bivariate chart artifact."""
+
+    result: BivariateChartResult
+    title: str
+    save_path: str | None
+    figure: Any
+    axes: tuple[Any, Any]
+
+
 def _require_columns(df: pd.DataFrame, required_columns: list[str]) -> None:
     missing_columns = [column for column in required_columns if column not in df.columns]
     if missing_columns:
@@ -37,6 +49,22 @@ def _format_number(value: float, precision: int) -> str:
         return "nan"
     text = f"{float(value):.{precision}f}".rstrip("0").rstrip(".")
     return "0" if text == "-0" else text
+
+
+def _build_default_title(feature_col: str, target_col: str) -> str:
+    return f"{feature_col} vs {target_col}"
+
+
+def _build_default_save_path(
+    save_dir: str | Path,
+    *,
+    feature_col: str,
+    target_col: str,
+) -> Path:
+    save_dir = Path(save_dir)
+    safe_feature = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in feature_col)
+    safe_target = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in target_col)
+    return save_dir / f"{safe_feature}_vs_{safe_target}_bivariate.png"
 
 
 def _build_interval_labels(bin_edges: list[float], *, precision: int) -> list[str]:
@@ -354,11 +382,112 @@ def build_and_plot_bivariate_chart(
     return result, figure_and_axes
 
 
+def build_bivariate_summaries(
+    df: pd.DataFrame,
+    *,
+    feature_cols: Sequence[str],
+    target_col: str,
+    n_bins: int = 6,
+    missing_label: str = DEFAULT_MISSING_LABEL,
+    zero_bin_label: str = DEFAULT_ZERO_BIN_LABEL,
+    precision: int = 6,
+) -> dict[str, BivariateChartResult]:
+    """Build bivariate summaries for multiple features at once."""
+    feature_cols = list(feature_cols)
+    if not feature_cols:
+        raise ValueError("feature_cols must contain at least one feature.")
+    _require_columns(df, [*feature_cols, target_col])
+
+    results: dict[str, BivariateChartResult] = {}
+    for feature_col in feature_cols:
+        results[feature_col] = build_bivariate_summary(
+            df,
+            feature_col=feature_col,
+            target_col=target_col,
+            n_bins=n_bins,
+            missing_label=missing_label,
+            zero_bin_label=zero_bin_label,
+            precision=precision,
+        )
+    return results
+
+
+def build_and_plot_bivariate_charts(
+    df: pd.DataFrame,
+    *,
+    feature_cols: Sequence[str],
+    target_col: str,
+    n_bins: int = 6,
+    missing_label: str = DEFAULT_MISSING_LABEL,
+    zero_bin_label: str = DEFAULT_ZERO_BIN_LABEL,
+    precision: int = 6,
+    title_map: dict[str, str] | None = None,
+    figsize: tuple[int, int] = (12, 6),
+    count_color: str = "tab:blue",
+    label_color: str = "red",
+    rotate_xticks: int = 45,
+    save_dir: str | Path | None = None,
+    output_dir: str | Path | None = None,
+) -> dict[str, BivariateBatchChartItem]:
+    """Build and plot bivariate charts for multiple features."""
+    feature_cols = list(feature_cols)
+    if not feature_cols:
+        raise ValueError("feature_cols must contain at least one feature.")
+    if save_dir is not None and output_dir is not None:
+        raise ValueError("Use only one of save_dir or output_dir.")
+
+    effective_save_dir = output_dir if output_dir is not None else save_dir
+
+    results = build_bivariate_summaries(
+        df,
+        feature_cols=feature_cols,
+        target_col=target_col,
+        n_bins=n_bins,
+        missing_label=missing_label,
+        zero_bin_label=zero_bin_label,
+        precision=precision,
+    )
+
+    chart_items: dict[str, BivariateBatchChartItem] = {}
+    for feature_col, result in results.items():
+        title = (
+            title_map[feature_col]
+            if title_map is not None and feature_col in title_map
+            else _build_default_title(feature_col, target_col)
+        )
+        save_path = (
+            str(_build_default_save_path(effective_save_dir, feature_col=feature_col, target_col=target_col))
+            if effective_save_dir is not None
+            else None
+        )
+        figure, axes = plot_bivariate_chart(
+            result,
+            title=title,
+            figsize=figsize,
+            count_color=count_color,
+            label_color=label_color,
+            rotate_xticks=rotate_xticks,
+            save_path=save_path,
+        )
+        chart_items[feature_col] = BivariateBatchChartItem(
+            result=result,
+            title=title,
+            save_path=save_path,
+            figure=figure,
+            axes=axes,
+        )
+
+    return chart_items
+
+
 __all__ = [
+    "BivariateBatchChartItem",
     "BivariateChartResult",
     "DEFAULT_MISSING_LABEL",
     "DEFAULT_ZERO_BIN_LABEL",
     "build_and_plot_bivariate_chart",
+    "build_and_plot_bivariate_charts",
     "build_bivariate_summary",
+    "build_bivariate_summaries",
     "plot_bivariate_chart",
 ]

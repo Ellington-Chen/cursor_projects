@@ -330,7 +330,7 @@ python3 -m unittest tests.test_lightgbm_optuna_tuner
 - 如果值重复很多，导致没法切出你要求的箱数，实际箱数可能少于 `n_bins`。
 - 如果特征列里有非数值字符串，转数值失败后也会被当作 `Missing`。
 
-### notebook / Python 示例
+### notebook / Python 示例（单特征）
 
 ```python
 import pandas as pd
@@ -356,6 +356,40 @@ result, _ = build_and_plot_bivariate_chart(
 print(result.summary)
 print(result.interval_rule)
 ```
+
+### notebook / Python 示例（多特征批量生成）
+
+```python
+import pandas as pd
+
+from bivariate_chart import build_and_plot_bivariate_charts
+
+df = pd.DataFrame(
+    {
+        "fail_out_month_cnt_24m": [None, 0, 0, 1, 2, 4, 8, 13],
+        "apply_cnt_30d": [0, 1, 2, 3, 4, 5, None, 10],
+        "label": [1, 0, 0, 1, 0, 1, 1, 1],
+    }
+)
+
+batch_result = build_and_plot_bivariate_charts(
+    df,
+    feature_cols=["fail_out_month_cnt_24m", "apply_cnt_30d"],
+    target_col="label",
+    n_bins=6,
+    save_dir="artifacts/bivariate_batch",
+)
+
+print(batch_result["fail_out_month_cnt_24m"].result.summary)
+print(batch_result["apply_cnt_30d"].result.summary)
+```
+
+批量模式下会自动：
+
+- 按 `"{feature_col} vs {target_col}"` 生成 title
+- 按特征名保存图片，例如：
+  - `artifacts/bivariate_batch/fail_out_month_cnt_24m_vs_label_bivariate.png`
+  - `artifacts/bivariate_batch/apply_cnt_30d_vs_label_bivariate.png`
 
 ### 依赖安装
 
