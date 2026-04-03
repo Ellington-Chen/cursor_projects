@@ -354,6 +354,12 @@ print(result.summary)
 print(result.interval_rule)
 ```
 
+### 依赖安装
+
+```bash
+pip install pandas matplotlib
+```
+
 ### 返回结果说明
 
 `result.summary` 会返回一个汇总表，常用字段包括：
