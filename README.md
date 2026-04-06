@@ -304,3 +304,115 @@ pip install lightgbm optuna pandas scikit-learn pyarrow
 ```bash
 python3 -m unittest tests.test_lightgbm_optuna_tuner
 ```
+
+## bivariate_chart
+
+新增了一个专门画 **bivariate chart（分箱样本数 + 坏账率/标签均值）** 的脚本：`bivariate_chart.py`。
+
+适合你这种想画：
+
+- 左轴：每个 bin 的样本量
+- 右轴：每个 bin 的 `label` 均值
+- `missing` 单独成一列
+- `0` 单独成一列
+- 非缺失值尽量按**等频分箱**
+- 横坐标明确说明每个 bin 的区间是**左闭右闭**还是**左开右闭**
+
+### 设计规则
+
+- `Missing` 永远单独作为一个 bin 展示。
+- `0` 永远单独作为一个 bin 展示。
+- 其余非缺失且不等于 `0` 的值使用 `pd.qcut` 做**近似等频分箱**，让每个 bin 的样本量尽量均匀。
+- 区间标签规则固定为：
+  - 第一箱：`[a, b]`
+  - 后续各箱：`(b, c]`
+- 当 `0` 单独成箱后，其余区间标签只覆盖非零部分。
+- 如果值重复很多，导致没法切出你要求的箱数，实际箱数可能少于 `n_bins`。
+- 如果特征列里有非数值字符串，转数值失败后也会被当作 `Missing`。
+
+### notebook / Python 示例（单特征）
+
+```python
+import pandas as pd
+
+from bivariate_chart import build_and_plot_bivariate_chart
+
+df = pd.DataFrame(
+    {
+        "fail_out_month_cnt_24m": [None, None, 0, 0, 1, 1, 2, 3, 4, 6, 8, 13],
+        "label": [1, 0, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1],
+    }
+)
+
+result, _ = build_and_plot_bivariate_chart(
+    df,
+    feature_col="fail_out_month_cnt_24m",
+    target_col="label",
+    n_bins=6,
+    title="fail_out_month_cnt_24m vs label",
+    save_path="artifacts/fail_out_month_cnt_24m_bivariate.png",
+)
+
+print(result.summary)
+print(result.interval_rule)
+```
+
+### notebook / Python 示例（多特征批量生成）
+
+```python
+import pandas as pd
+
+from bivariate_chart import build_and_plot_bivariate_charts
+
+df = pd.DataFrame(
+    {
+        "fail_out_month_cnt_24m": [None, 0, 0, 1, 2, 4, 8, 13],
+        "apply_cnt_30d": [0, 1, 2, 3, 4, 5, None, 10],
+        "label": [1, 0, 0, 1, 0, 1, 1, 1],
+    }
+)
+
+batch_result = build_and_plot_bivariate_charts(
+    df,
+    feature_cols=["fail_out_month_cnt_24m", "apply_cnt_30d"],
+    target_col="label",
+    n_bins=6,
+    save_dir="artifacts/bivariate_batch",
+)
+
+print(batch_result["fail_out_month_cnt_24m"].result.summary)
+print(batch_result["apply_cnt_30d"].result.summary)
+```
+
+批量模式下会自动：
+
+- 按 `"{feature_col} vs {target_col}"` 生成 title
+- 按特征名保存图片，例如：
+  - `artifacts/bivariate_batch/fail_out_month_cnt_24m_vs_label_bivariate.png`
+  - `artifacts/bivariate_batch/apply_cnt_30d_vs_label_bivariate.png`
+
+### 依赖安装
+
+```bash
+pip install pandas matplotlib
+```
+
+### 返回结果说明
+
+`result.summary` 会返回一个汇总表，常用字段包括：
+
+- `bin`：图上显示的 bin 标签
+- `count`：该 bin 的样本数
+- `count_ratio`：该 bin 占总样本的比例
+- `mean_label`：该 bin 的标签均值
+- `is_missing`：是否为缺失箱
+- `left_endpoint` / `right_endpoint`：区间左右端点
+- `left_closed` / `right_closed`：左右端点是否包含
+
+这样你不光能画图，还能把分箱结果直接导出去做复核。
+
+### 自测
+
+```bash
+python3 -m unittest tests.test_bivariate_chart
+```
