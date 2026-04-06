@@ -244,6 +244,111 @@ result = run_lightgbm_optuna_from_df(
 - `result.phase_summaries`
 - `result.oot_score`
 
+### 只跑一轮随机超参搜索：适合“变量已经选好”
+
+如果你已经完成变量筛选，不想再跑完整的特征选择流程，只想复用你原先
+`RandomizedSearchCV` 那套搜索范围单独搜一轮参数，可以直接这样：
+
+```python
+from lightgbm_random_search import run_lightgbm_random_search_from_df
+
+selected_features = ["f1", "f2", "f3", "f4"]
+
+result = run_lightgbm_random_search_from_df(
+    train_df=train_df,
+    target_col="target",
+    feature_cols=selected_features,
+    task_type="classification",  # 或 "regression"
+    n_iter=20,                   # 和你原代码默认一致
+    cv=3,
+    search_n_jobs=8,
+    model_n_jobs=8,
+    random_state=2025,
+    show_progress=True,
+)
+
+result.best_params
+result.best_score
+result.best_model_params
+```
+
+这个接口默认复用了你原代码里的搜索空间：
+
+- `num_leaves`: `randint(4, 10)`
+- `max_bin`: `200~2000`, 步长 `100`
+- `max_depth`: `randint(2, 4)`
+- `n_estimators`: `20~300`, 步长 `20`
+- `scale_pos_weight`: `[0.8, 1]`
+- `learning_rate`: `uniform(0.004, 0.05)`
+- `min_child_samples`: `2000~14000`, 步长 `500`
+- `subsample`: `uniform(0.7, 0.3)`
+- `colsample_bytree`: `uniform(0.7, 0.3)`
+- `reg_alpha`: `uniform(0.0001, 10)`
+
+如果你已经自己切好了 `X_train` / `y_train`，也可以直接调用：
+
+```python
+from lightgbm_random_search import run_lightgbm_random_search
+
+result = run_lightgbm_random_search(
+    X_train[selected_features],
+    y_train,
+    task_type="classification",
+    show_progress=True,
+)
+```
+
+进度展示说明：
+
+- `show_progress=True`：显示随机搜索进度
+- `show_progress=False`：关闭进度展示
+- 安装了 `tqdm` 时优先显示进度条；否则自动退化成文本进度
+
+### 从你原始 backward feature selection 的第一轮之后继续跑
+
+如果你想尽量保持最开始那段代码的风格，只是假设：
+
+- 第一轮 fixed params 已经跑完
+- 无用变量已经删掉
+- 你手里已经有删完后的变量列表
+
+那么可以直接用这个更贴近原始流程的入口：
+
+```python
+from lightgbm_resume_after_first_round import run_backward_selection_after_first_round
+
+selected_features = ["f1", "f2", "f3", "f4"]
+
+result = run_backward_selection_after_first_round(
+    X_train=X_train,
+    y_train=y_train,
+    X_val=X_val,
+    y_val=y_val,
+    X_oot=X_oot,
+    y_oot=y_oot,
+    selected_features=selected_features,
+    task_type="classification",
+    n_random_search_iter=20,
+    random_search_cv=3,
+    random_search_n_jobs=8,
+    model_n_jobs=8,
+    show_progress=True,
+)
+
+result.best_params
+result.model
+result.metricsTest
+result.metricsOOT
+result.feature_importance_df
+```
+
+这版会直接从你原代码里的 `RandomizedSearchCV` 开始：
+
+- 先做随机搜索
+- 再用最优参数训练 LightGBM
+- 再输出 train / test / oot 的指标
+- 再返回特征重要性
+
 另外还附带了一个 notebook 示例：
 
 ```text
