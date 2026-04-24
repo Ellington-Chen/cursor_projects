@@ -8,6 +8,7 @@ VERIFY_IMAGE_RESULT_TYPE = "all"
 VERIFY_IMAGE_SOURCE_GROUPS = ("bank", "cf", "top", "others", "nonloan")
 VERIFY_IMAGE_METRICS = ("ordercnt", "membercnt")
 VERIFY_IMAGE_DAY_WINDOWS = (31, 60, 90, 180, 360, 720)
+VERIFY_IMAGE_BIND_MONTH_METRIC = "membercnt"
 VERIFY_DAY_TO_MONTH = {
     31: 1,
     60: 2,
@@ -51,12 +52,12 @@ def build_verify_first_bind_months_feature_name(
 VERIFY_IMAGE_FIRST_BIND_MONTHS_COLUMN = build_verify_first_bind_months_feature_name(
     VERIFY_IMAGE_CARD_TYPE,
     VERIFY_IMAGE_RESULT_TYPE,
-    "membercnt",
+    VERIFY_IMAGE_BIND_MONTH_METRIC,
 )
 VERIFY_IMAGE_LAST_BIND_MONTHS_COLUMN = build_verify_last_bind_months_feature_name(
     VERIFY_IMAGE_CARD_TYPE,
     VERIFY_IMAGE_RESULT_TYPE,
-    "membercnt",
+    VERIFY_IMAGE_BIND_MONTH_METRIC,
 )
 
 
@@ -93,34 +94,62 @@ def list_verify_image_feature_columns() -> list[str]:
     return [
         VERIFY_IMAGE_FIRST_BIND_MONTHS_COLUMN,
         VERIFY_IMAGE_LAST_BIND_MONTHS_COLUMN,
+        *list_verify_image_source_bind_month_columns(),
         *list_verify_image_all_columns(),
         *list_verify_image_source_columns(),
     ]
 
 
+def list_verify_image_source_bind_month_columns() -> list[str]:
+    return [
+        build_verify_last_bind_months_feature_name(
+            VERIFY_IMAGE_CARD_TYPE,
+            VERIFY_IMAGE_RESULT_TYPE,
+            VERIFY_IMAGE_BIND_MONTH_METRIC,
+            source_group=source_group,
+        )
+        for source_group in VERIFY_IMAGE_SOURCE_GROUPS
+    ] + [
+        build_verify_first_bind_months_feature_name(
+            VERIFY_IMAGE_CARD_TYPE,
+            VERIFY_IMAGE_RESULT_TYPE,
+            VERIFY_IMAGE_BIND_MONTH_METRIC,
+            source_group=source_group,
+        )
+        for source_group in VERIFY_IMAGE_SOURCE_GROUPS
+    ]
+
+
+def _build_bind_month_columns(*, source_group: str) -> dict[int, str]:
+    return {
+        day_window: build_verify_feature_name(
+            VERIFY_IMAGE_CARD_TYPE,
+            source_group,
+            VERIFY_IMAGE_RESULT_TYPE,
+            VERIFY_IMAGE_BIND_MONTH_METRIC,
+            day_window,
+        )
+        for day_window in VERIFY_IMAGE_DAY_WINDOWS
+    }
+
+
 def _compute_bind_months_from_windows(
-    numeric_all_df: pd.DataFrame,
+    numeric_df: pd.DataFrame,
     *,
+    columns_by_day_window: dict[int, str],
     prefer: str,
 ) -> pd.Series:
     if prefer not in {"nearest", "furthest"}:
         raise ValueError("prefer must be either 'nearest' or 'furthest'")
 
-    bind_months = pd.Series(np.nan, index=numeric_all_df.index, dtype="float64")
+    bind_months = pd.Series(np.nan, index=numeric_df.index, dtype="float64")
     ordered_day_windows = sorted(
         VERIFY_IMAGE_DAY_WINDOWS,
         key=lambda day_window: VERIFY_DAY_TO_MONTH[day_window],
         reverse=prefer == "furthest",
     )
     for day_window in ordered_day_windows:
-        column = build_verify_feature_name(
-            VERIFY_IMAGE_CARD_TYPE,
-            "all",
-            VERIFY_IMAGE_RESULT_TYPE,
-            "membercnt",
-            day_window,
-        )
-        has_activity = numeric_all_df[column] > 0
+        has_activity = numeric_df[columns_by_day_window[day_window]] > 0
         update_mask = bind_months.isna() & has_activity
         bind_months.loc[update_mask] = float(VERIFY_DAY_TO_MONTH[day_window])
     return bind_months
@@ -142,8 +171,9 @@ def transform_verify_features(
     Output columns are:
     1. verify_all_all_all_membercnt_first_bind_months
     2. verify_all_all_all_membercnt_last_bind_months
-    3. verify_all_all_all_{ordercnt,membercnt}_day{31,60,90,180,360,720}
-    4. verify_all_{bank,cf,top,others,nonloan}_all_{ordercnt,membercnt}_day{31,60,90,180,360,720}
+    3. verify_all_{bank,cf,top,others,nonloan}_all_membercnt_{first,last}_bind_months
+    4. verify_all_all_all_{ordercnt,membercnt}_day{31,60,90,180,360,720}
+    5. verify_all_{bank,cf,top,others,nonloan}_all_{ordercnt,membercnt}_day{31,60,90,180,360,720}
     """
     result_df = df.copy() if copy else df
 
@@ -185,14 +215,43 @@ def transform_verify_features(
 
     aggregated_df = pd.DataFrame(aggregated_columns, index=result_df.index)
     result_df.loc[:, aggregated_df.columns] = aggregated_df
+    overall_bind_month_columns = _build_bind_month_columns(source_group="all")
     result_df[VERIFY_IMAGE_FIRST_BIND_MONTHS_COLUMN] = _compute_bind_months_from_windows(
         aggregated_df,
+        columns_by_day_window=overall_bind_month_columns,
         prefer="furthest",
     )
     result_df[VERIFY_IMAGE_LAST_BIND_MONTHS_COLUMN] = _compute_bind_months_from_windows(
         aggregated_df,
+        columns_by_day_window=overall_bind_month_columns,
         prefer="nearest",
     )
+    for source_group in VERIFY_IMAGE_SOURCE_GROUPS:
+        source_bind_month_columns = _build_bind_month_columns(source_group=source_group)
+        result_df[
+            build_verify_last_bind_months_feature_name(
+                VERIFY_IMAGE_CARD_TYPE,
+                VERIFY_IMAGE_RESULT_TYPE,
+                VERIFY_IMAGE_BIND_MONTH_METRIC,
+                source_group=source_group,
+            )
+        ] = _compute_bind_months_from_windows(
+            numeric_source_df,
+            columns_by_day_window=source_bind_month_columns,
+            prefer="nearest",
+        )
+        result_df[
+            build_verify_first_bind_months_feature_name(
+                VERIFY_IMAGE_CARD_TYPE,
+                VERIFY_IMAGE_RESULT_TYPE,
+                VERIFY_IMAGE_BIND_MONTH_METRIC,
+                source_group=source_group,
+            )
+        ] = _compute_bind_months_from_windows(
+            numeric_source_df,
+            columns_by_day_window=source_bind_month_columns,
+            prefer="furthest",
+        )
 
     if keep_only_target_columns:
         return result_df.reindex(columns=list_verify_image_feature_columns())

@@ -8,8 +8,10 @@ from verify_feature_utils import (
     VERIFY_IMAGE_LAST_BIND_MONTHS_COLUMN,
     VERIFY_IMAGE_METRICS,
     VERIFY_IMAGE_SOURCE_GROUPS,
+    build_verify_first_bind_months_feature_name,
     build_verify_feature_name,
     build_verify_image_variables,
+    build_verify_last_bind_months_feature_name,
     transform_verify_features,
 )
 
@@ -46,6 +48,14 @@ class VerifyFeatureUtilsTests(unittest.TestCase):
             VERIFY_IMAGE_FIRST_BIND_MONTHS_COLUMN,
             VERIFY_IMAGE_LAST_BIND_MONTHS_COLUMN,
             *[
+                build_verify_last_bind_months_feature_name("all", "all", "membercnt", source_group=source_group)
+                for source_group in ("bank", "cf", "top", "others", "nonloan")
+            ],
+            *[
+                build_verify_first_bind_months_feature_name("all", "all", "membercnt", source_group=source_group)
+                for source_group in ("bank", "cf", "top", "others", "nonloan")
+            ],
+            *[
                 build_verify_feature_name("all", "all", "all", metric, day_window)
                 for metric in ("ordercnt", "membercnt")
                 for day_window in (31, 60, 90, 180, 360, 720)
@@ -59,7 +69,7 @@ class VerifyFeatureUtilsTests(unittest.TestCase):
         ]
 
         self.assertEqual(result.columns.tolist(), expected_columns)
-        self.assertEqual(result.shape, (2, 74))
+        self.assertEqual(result.shape, (2, 84))
         self.assertEqual(result.loc[0, "verify_all_all_all_ordercnt_day31"], 4)
         self.assertEqual(result.loc[0, "verify_all_all_all_ordercnt_day720"], 5)
         self.assertEqual(result.loc[0, "verify_all_all_all_membercnt_day31"], 1)
@@ -67,6 +77,16 @@ class VerifyFeatureUtilsTests(unittest.TestCase):
         self.assertEqual(result.loc[0, "verify_all_all_all_membercnt_day180"], 3)
         self.assertEqual(result.loc[0, VERIFY_IMAGE_FIRST_BIND_MONTHS_COLUMN], 6.0)
         self.assertEqual(result.loc[0, VERIFY_IMAGE_LAST_BIND_MONTHS_COLUMN], 1.0)
+        self.assertEqual(result.loc[0, "verify_all_bank_all_membercnt_first_bind_months"], 1.0)
+        self.assertEqual(result.loc[0, "verify_all_bank_all_membercnt_last_bind_months"], 1.0)
+        self.assertEqual(result.loc[0, "verify_all_cf_all_membercnt_first_bind_months"], 2.0)
+        self.assertEqual(result.loc[0, "verify_all_cf_all_membercnt_last_bind_months"], 2.0)
+        self.assertEqual(result.loc[0, "verify_all_top_all_membercnt_first_bind_months"], 6.0)
+        self.assertEqual(result.loc[0, "verify_all_top_all_membercnt_last_bind_months"], 6.0)
+        self.assertTrue(pd.isna(result.loc[0, "verify_all_others_all_membercnt_first_bind_months"]))
+        self.assertTrue(pd.isna(result.loc[0, "verify_all_others_all_membercnt_last_bind_months"]))
+        self.assertTrue(pd.isna(result.loc[0, "verify_all_nonloan_all_membercnt_first_bind_months"]))
+        self.assertTrue(pd.isna(result.loc[0, "verify_all_nonloan_all_membercnt_last_bind_months"]))
         self.assertTrue(pd.isna(result.loc[1, VERIFY_IMAGE_FIRST_BIND_MONTHS_COLUMN]))
         self.assertTrue(pd.isna(result.loc[1, VERIFY_IMAGE_LAST_BIND_MONTHS_COLUMN]))
 
